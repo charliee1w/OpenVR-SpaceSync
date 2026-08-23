@@ -1,136 +1,111 @@
 # SpaceSync
 
-SpaceSync (a fork of Nyabsi's [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride)) aligns SLAM-tracked headsets (Pico, Galaxy XR and similar) with lighthouse-tracked devices, without the drift that plagues traditional playspace calibration. Instead of computing a one-time offset between two tracking systems that slowly slide apart, it uses a Vive tracker rigidly mounted to the headset: after calibration, the driver stops using the headset's own pose and builds it from the tracker instead.
+SpaceSync keeps your lighthouse gear (Vive/Tundra trackers, Index controllers, base stations) lined up with a SLAM headset (Galaxy XR, Quest, Pico, anything streamed through Virtual Desktop, Steam Link, ALVR and friends). It needs one tracker mounted on the headset. That tracker tells the driver how the two tracking systems relate every frame, so nothing drifts apart over time.
 
-This puts the headset and all your other lighthouse devices on the same tracking system, so there's nothing left to drift against. The SLAM tracking is still there underneath, you just get proper alignment on top of it.
+It is a fork of Nyabsi's [OpenVR SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride), which itself grew out of pushrax's [OpenVR SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator). Big thanks to both.
 
-> [!NOTE]
-> If you find bugs or issues, let me know over e-mail at `nyabsi@sovellus.cc` I will be responding to you when I have time. This software will receive updates on irregular basis but each update is guaranteed to improve the software in a way or another, thanks for using it even on it's current state.
+> Beta. It works well on my setup (Galaxy XR + Virtual Desktop, Vive Tracker 3.0 on the head, three body trackers, two Index controllers, four base stations). Other setups should work too, but I have not tested them all.
+
+## Two ways to run it
+
+**Tracker drives the headset** (this is what SpaceOverride does). After calibration the driver throws away the headset's own pose and builds it from the head tracker plus the calibrated offset. Headset and trackers then live in the same lighthouse space. Great when your streamer displays the frame exactly the way SteamVR rendered it.
+
+**Follow SLAM HMD**. The headset keeps its own SLAM pose. The head tracker is only used to measure the offset between SLAM space and lighthouse space, and that offset is applied to every lighthouse device instead. Use this when your streamer reprojects with the headset's own tracking. A common symptom is that after a brief tracking hiccup the whole world stays rotated by a few degrees, you get black borders at the edge of the view, and your hands are no longer in front of you until you recalibrate. Follow mode prevents this. A relocalisation simply shows up as your trackers jumping once and settling again.
+
+Both modes share the same calibration. Switching is one checkbox and does not require recalibration.
+
+## How it compares
+
+### Space Calibrator
+
+Space Calibrator does a one time calibration between two tracking systems and pushes a fixed transform onto the devices that are not the headset. The two spaces slowly slide apart, so you need to recalibrate now and then. The continuous calibration forks (bd_, ArcticFox8515, hyblocker) fixed that by mounting a tracker on the headset and running the solver continuously with a rolling sample buffer in the background.
+
+SpaceSync's follow mode uses the same general idea, but handles it differently:
+
+* The offset is measured in closed form every frame from the calibrated rigid mount. There is no rolling Kabsch solve and no need to move around so the solver gets enough variety.
+
+* The offset measurement is weighted by head speed and paused during fast head movement. Your trackers and controllers are still tracked live the whole time. Only the measurement of the offset waits until your head is calm again. This keeps feet and hands from swaying when you turn your head quickly.
+
+* The remaining time offset between the headset pose and tracker pose is estimated online and compensated. Streamers often predict their poses ahead of time, so this prevents head movement from leaking into the alignment.
+
+* Lighthouse tracking state is respected. An IMU only dead reckoned tracker pose never drives anything and never updates the offset.
+
+* A relocalisation is corrected within about a second once your head movement is calm.
+
+I have not benchmarked it against hyblocker's fork, so I am not making any big claims. It is a smaller and more direct implementation that came out of chasing a very specific bug.
+
+### SpaceOverride
+
+SpaceSync keeps SpaceOverride's tracker drives headset mode untouched and adds the follow mode on top. Beyond that, this is what changed internally:
+
+* The driver only trusts `TrackingResult_Running_OK` poses from the head tracker. Before, a tracker that lost its base stations kept driving the headset with a frozen position and gyro only rotation. That broken data was also learned into the drift estimate.
+
+* The drift estimate (SLAM vs tracker) is only fed by clean frames and its rotation and translation pair is always consistent.
+
+* Config handoff between overlay and driver had a race condition because the enable flag could be written before the tracker ID. This is fixed, together with additional bounds checks.
+
+* The overlay sends one transform per device instead of disabling and enabling it again, which could previously let a single frame through without a transform.
+
+* The driver logs tracker state changes, drift jumps, and the learned latency offset to `spacesync_driver.log`, so there is an answer to "why did my view just move?"
 
 ## Requirements
 
-- Lighthouse system (or other equivalent)
-- Rigid Tracker (i.e., Vive Tracker 3.0 or equivalent)
-- Headset with SLAM or other positional tracking system
+* A lighthouse setup
 
-## Compatibility
+* One rigid tracker on the headset (Vive Tracker 3.0 works great, Tundra is jittery on the head) when using override. It should work smoothly in Follow HMD mode though.
 
-| Streamer | Status | Notes |
-| --- | --- | --- |
-| PICO Connect | ✅ Works | |
-| Virtual Desktop | ✅ Works | |
-| ALVR | ✅ Works | |
-| Meta Quest Link | ⚠️ Unconfirmed | Unconfirmed, let me know, email: nyabsi@sovellus.cc |
-| Air Link | ⚠️ Unconfirmed | Unconfirmed, let me know, email: nyabsi@sovellus.cc |
-| Steam Link | ✅ Works | |
-| Display Port powered SLAM devices | ✅ Works | Such as: Pimax, PSVR2, HP Reverb G2, etc. |
-| VIVE Hub | ✅ Works | VIVE Focus Vision, via e-mail |
+* A headset with its own positional tracking (SLAM)
 
-## Calibration Guide
+Compatibility inherited from SpaceOverride includes PICO Connect, Virtual Desktop, ALVR, Steam Link, DisplayPort SLAM headsets (Pimax, PSVR2, Reverb G2), and VIVE Hub. SpaceSync itself is tested with Virtual Desktop and a Galaxy XR. If you run something else, tell me how it went.
 
-1. Mount a rigid tracker to your headset.
-2. Hit **Calibrate**. It goes through a few stages, and the on-screen text tells you what it wants at each one:
-    - First it asks you to **move your head around** so it can spot which tracker is the one mounted to your head.
-    - Then it calibrates. *Look left, Look center, Look right, Look center, Look up, Look center.*
-3. That's it. The profile saves on its own and the override stays running in the background.
+## Calibration
 
-> [!TIP]
-> **Patience is key.** If the result feels odd or misaligned after calibrating, switch to a **slower calibration speed** and re-try. Slower calibration gives the solver more data to work with and almost always produces a better result.
+1. Mount the tracker on the headset. It has to stay in place. If it shifts, you need to recalibrate.
 
-Once it's calibrated, the headset is driven entirely by the tracker, so if you don't need the SLAM devices you can disable the headset's own tracking too. This also means the override works fine with your headset set to 3DoF mode or with its positional tracking disabled.
+2. Open SpaceSync (desktop window or SteamVR dashboard) and click the big circle.
 
-## Follow SLAM HMD
+3. If you have more than one tracker, it first asks you to move your head so it can identify the tracker mounted on the headset.
 
-Some streamers reproject the SteamVR frame on the headset using the headset's **own** (SLAM) pose. If the headset silently re-localises, the SLAM space and the lighthouse space drift apart by a few degrees, and with the tracker driving the headset that shows up as a rotated view, black borders and hands that are no longer in front of you – until you re-calibrate.
+4. Follow the wizard: look left, straight, right, straight, up, straight, down, straight. Use smooth movements and take your time. You do not necessarily need to follow the wizard exactly and can speed up the sequence if you want to. The wizard mainly helps new users through calibration.
 
-**Follow SLAM HMD** (Settings) turns the relation around: the headset keeps its own pose, the head tracker is used to *measure* the offset between the two spaces every frame, and that offset is applied to every lighthouse device (including the head tracker) instead. The view can then never rotate away from the headset; a re-localisation shows up as your trackers/controllers briefly jumping and settling back.
+5. Done. The profile saves itself and the driver keeps running in the background. SteamVR remembers it across restarts.
 
-- Calibrate exactly as before (a rigid head tracker is still required).
-- The toggle takes effect within a second and is saved in the profile.
-- The "Relative Calibration" smoothing sliders control how quickly the devices follow.
-
-## Disable calibrated Offset
-
-> [!CAUTION]
-> Please **DO NOT** use this, unless you understand how to do a manual TrackingOverride, this is meant for **advanced** users and not for your average person, you should not have *any* reason to use this, unless you *know* what you are doing.
-
-Native Override feeds the raw tracker data, with the corrected offset applied, directly to the headset. This makes the headset behave as a truly native lighthouse device. The trade-off is yaw misalignment: the tracker's projection is different from your headset's, which is also why local space tracking is required.
-
-To set it up:
-
-1. Enable the **Disable calibrated Offset** option.
-2. Run the calibration.
-3. Stand up straight and rotate your body in a circle while recentering your **headset's** space (not SteamVR's) until you find the spot where the view lines up.
-4. Once aligned, you can optionally turn off the headset's own tracking entirely, and the pose never changes from that point on.
-
-> [!NOTE]
-> After a headset restart, you may need to redo the yaw alignment.
+If the result feels off, choose a slower calibration speed in Settings and run it again. Slow is a good default.
 
 ## Troubleshooting
 
-### My calibration feels odd / slightly off
+**View rotated / black borders / hands not in front of me after a tracking hiccup.** Turn on Follow SLAM HMD. If you want to see what happened, look at `spacesync_driver.log` next to `vrserver.exe`, usually in `C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\`. Lines starting with `Head tracker:` show tracker state changes, `Drift (SLAM->tracker) changed` shows the relation between the two spaces jumping, and `latency offset` is the learned time offset.
 
-Re-run the calibration with a **slower calibration speed**. A rushed calibration is the most common cause of a bad offset, so take your time, move smoothly, and let it finish.
+**Trackers sway when I turn my head fast (follow mode).** Hold still for a second and it should settle. If it keeps happening, turn the `minCutoff` of Relative Calibration down a bit.
 
-### My trackers are gone / flew away after leaving headset unattended
+**Controllers jump, then settle back.** This is expected when the headset relocalises. That is the alignment catching up.
 
-You should see an notification show up, follow the instructions to restore tracking.
+**SpaceSync says the driver is unavailable.** SteamVR has to be running and the SpaceSync add on has to be enabled under SteamVR Settings > Startup / Shutdown > Manage Add ons. Overlay and driver must come from the same build. The installer takes care of that.
 
-### My view is completely messed up!
+**My calibration feels odd.** Recalibrate with a slower speed, move smoothly, and make sure the tracker cannot wobble on the headset.
 
-Your headset lost tracking it's tracking space, re-calibrate.
+## Building
 
-### Being forced to look into one direction
+You need Visual Studio with the C++ workload (brings CMake and Ninja), the Vulkan SDK, and NSIS. Then:
 
-Don't launch OVR Advanced settings and try again.
+```
+build.bat            configure, build, copy, make the installer
 
-### My controllers jump, then settle back
+build.bat nopack     build and copy only
 
-Expected behavior, not a bug. 
+build.bat clean      wipe the build folder first
+```
 
-Your controllers use the headset's inside-out tracking, which drifts relative to your lighthouse space, the driver corrects that drift and shifts back into place.
+The installer lands in `dev-resources\SpaceSync_Installer.exe`. Git submodules are pulled automatically if they are missing.
 
-### My full body tracking seems weird in VRChat!
+## Credits and license
 
-This is expected, there is issues with the VRChat IK system that is not obvious from first glance.
+* Nyabsi for OpenVR SpaceOverride, the base this fork stands on.
 
-Usually Space Calibrator is not precise enough for these issues to show up, but with SpaceOverride you will see these issues.
+* pushrax (tach) for OpenVR SpaceCalibrator, the calibration math and the driver hook idea.
 
-Each Lighthouse HMD suffers from the same issues and this is unfortunately the reality we live in.
+* bd_, ArcticFox8515 and hyblocker for showing that continuous calibration with a head tracker is the way to go.
 
-I am unable to solve these issues as they are not caused by SpaceOverride but I am working on potential workarounds.
+* Fonts: Manrope and JetBrains Mono, both SIL Open Font License.
 
-## FAQ
-
-### How is this different from TrackingOverride?
-
-This is **not** TrackingOverride. TrackingOverride simply substitutes one device's pose for another's, which leaves you to deal with the offset between the tracker and the headset yourself. SpaceOverride instead **automatically calculates the proper offset** between the mounted tracker and the headset during calibration, then continuously reconstructs the headset pose from the tracker using that offset. The result is an aligned, drift-free pose rather than a raw pose swap.
-
-### Does this conflict with OpenVR Space Calibrator?
-
-No. SpaceOverride does not conflict with Space Calibrator, you can have both installed. They solve the alignment problem differently, but having Space Calibrator present won't break the override.
-
-### Why are Tundra Trackers unusable?
-
-> [!IMPORTANT]
-> Tundra Tracker support is W.I.P and the issues cited below are being worked on, in future release Tundras will be compatible without any major issues.
-
-The mounted tracker drives your *entire headset pose*, so the tracker's quality directly becomes your view's quality. Tundra Trackers are known for jittery tracking, and jitter that's merely annoying on a hip or foot becomes nauseating when it's applied to your head. Use a Vive Tracker 3.0 or an equivalently stable device.
-
-### Can wireless latency affect the pose?
-
-Yes. The headset's display pipeline and the lighthouse tracker run on different clocks, so wireless streaming latency (and an unstable connection in general) can introduce a delay between your real head movement and the tracker-driven pose, which shows up as lag or swimming in your view. A solid Wi-Fi setup (or wired connection where possible) keeps this negligible.
-
-### Does it drift?
-
-No, all drift is induced by poor lighthouse performance, please ensure your lighthouse setup does not have interference.
-
-You can use guide such as: [Link](https://www.notion.so/yeove/SteamVR-Hardware-Troubleshooting-Megathread-Setup-Guide-16fc956d336a8037b738d1b0b1ded2f0#1c0c956d336a8035b76dd1b87527d180)
-
-## Acknowledgements
-
-This project uses/used substancial parts of [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator). Huge thanks to [pushrax](https://github.com/pushrax) for their work, which this project builds on.
-
-## License
-
-Commits up to and including `1cc0583` are MIT (see [`LICENSE.MIT`](LICENSE.MIT)). Everything after is AGPLv3 (see [`LICENSE`](LICENSE)).
+Licensed under AGPLv3, see [LICENSE](LICENSE). Commits up to and including `1cc0583` of the original project are MIT, see [LICENSE.MIT](LICENSE.MIT).
