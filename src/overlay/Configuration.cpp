@@ -90,6 +90,18 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.continuousSync = true;
 
+	if (obj["followSlam"].is<bool>())
+		ctx.followSlamHmd = obj["followSlam"].get<bool>();
+	else
+		ctx.followSlamHmd = false;
+
+	if (obj["uiScale"].is<double>())
+		ctx.uiScale = (float)obj["uiScale"].get<double>();
+	else
+		ctx.uiScale = 1.25f;
+	if (ctx.uiScale < 0.8f) ctx.uiScale = 0.8f;
+	if (ctx.uiScale > 2.0f) ctx.uiScale = 2.0f;
+
 	if (obj["predictionTime"].is<double>())
 		ctx.predictionTime = obj["predictionTime"].get<double>();
 	else
@@ -181,6 +193,9 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
 	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);
 	profile["continuousSync"].set<bool>(ctx.continuousSync);
+	profile["followSlam"].set<bool>(ctx.followSlamHmd);
+	double uiScale = ctx.uiScale;
+	profile["uiScale"].set<double>(uiScale);
 
 	double time = ctx.predictionTime;
 	profile["predictionTime"].set<double>(time);
@@ -249,12 +264,14 @@ static void LogRegistryResult(LSTATUS result)
 	std::cerr << "Opening registry key: " << message << std::endl;
 }
 
-static const char *RegistryKey = "Software\\OpenVR-SpaceOverride";
+static const char *RegistryKey = "Software\\SpaceSync";
+// Old OpenVR-SpaceOverride profiles are read as fallback so nobody has to recalibrate.
+static const char *LegacyRegistryKey = "Software\\OpenVR-SpaceOverride";
 
-static std::string ReadRegistryKey()
+static std::string ReadRegistryValue(const char *key)
 {
 	DWORD size = 0;
-	auto result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config", RRF_RT_REG_SZ, 0, 0, &size);
+	auto result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, key, "Config", RRF_RT_REG_SZ, 0, 0, &size);
 	if (result != ERROR_SUCCESS)
 	{
 		LogRegistryResult(result);
@@ -264,14 +281,22 @@ static std::string ReadRegistryKey()
 	std::string str;
 	str.resize(size);
 
-	result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config", RRF_RT_REG_SZ, 0, &str[0], &size);
+	result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, key, "Config", RRF_RT_REG_SZ, 0, &str[0], &size);
 	if (result != ERROR_SUCCESS)
 	{
 		LogRegistryResult(result);
 		return "";
 	}
-	
+
 	str.resize(size - 1);
+	return str;
+}
+
+static std::string ReadRegistryKey()
+{
+	std::string str = ReadRegistryValue(RegistryKey);
+	if (str.empty())
+		str = ReadRegistryValue(LegacyRegistryKey);
 	return str;
 }
 

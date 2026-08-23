@@ -2,15 +2,15 @@
   "source": "builtin",
   "applications": [
     {
-      "app_key": "Nyabsi.SpaceOverride",
+      "app_key": "Shinyflvres.SpaceSync",
       "launch_type": "binary",
-      "binary_path_windows": "OpenVR-SpaceOverride.exe",
+      "binary_path_windows": "SpaceSync.exe",
       "is_dashboard_overlay": true,
 
       "strings": {
         "en_us": {
-          "name": "Space Override",
-          "description": "OpenVR Space Override Overlay"
+          "name": "SpaceSync",
+          "description": "SpaceSync overlay - aligns lighthouse devices with SLAM headsets"
         }
       }
     }

@@ -7,7 +7,7 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 
-project(OpenVR-SpaceOverride)
+project(SpaceSync)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,7 +26,7 @@ add_subdirectory(3rdparty)
 
 message(STATUS "ENABLE_VULKAN_VALIDATION = ${ENABLE_VULKAN_VALIDATION}")
 
-add_executable(OpenVR-SpaceOverride
+add_executable(SpaceSync
     "src/overlay/Main.cpp"
     "src/overlay/VulkanRenderer.cpp"
     "src/overlay/ImGuiWindow.cpp"
@@ -34,38 +34,39 @@ add_executable(OpenVR-SpaceOverride
     "src/overlay/Configuration.cpp"
     "src/overlay/IPCClient.cpp"
     "src/overlay/UserInterface.cpp"
+    "src/overlay/Theme.cpp"
     "src/overlay/EmbeddedFiles.cpp"
 )
 
-target_compile_features(OpenVR-SpaceOverride PUBLIC cxx_std_20)
+target_compile_features(SpaceSync PUBLIC cxx_std_20)
 
-target_include_directories(OpenVR-SpaceOverride
+target_include_directories(SpaceSync
     PRIVATE
         "${CMAKE_SOURCE_DIR}/include/overlay"
         "${CMAKE_SOURCE_DIR}/include/shared"
 )
 
-target_compile_definitions(OpenVR-SpaceOverride
+target_compile_definitions(SpaceSync
     PRIVATE
         _HAS_DEPRECATED_NEGATORS=1
         _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
 )
 
 if (ENABLE_VULKAN_VALIDATION)
-    target_compile_definitions(OpenVR-SpaceOverride PRIVATE ENABLE_VULKAN_VALIDATION)
+    target_compile_definitions(SpaceSync PRIVATE ENABLE_VULKAN_VALIDATION)
 endif()
 
 if (MSVC)
-    target_compile_options(OpenVR-SpaceOverride PRIVATE /bigobj)
+    target_compile_options(SpaceSync PRIVATE /bigobj)
 endif()
 
 # Windows executable icon
 if (WIN32)
-    target_sources(OpenVR-SpaceOverride PRIVATE "resources/winicon.rc")
+    target_sources(SpaceSync PRIVATE "resources/winicon.rc")
 endif()
 
 
-target_link_libraries(OpenVR-SpaceOverride
+target_link_libraries(SpaceSync
     PRIVATE
         OpenVR::API
         ImGui
@@ -73,7 +74,7 @@ target_link_libraries(OpenVR-SpaceOverride
         PicoJSON
 )
 
-add_library(driver_spaceoverride SHARED
+add_library(driver_spacesync SHARED
     "src/driver/Main.cpp"
     "src/driver/ServerTrackedDeviceProvider.cpp"
     "src/driver/IPCServer.cpp"
@@ -83,17 +84,17 @@ add_library(driver_spaceoverride SHARED
     "src/driver/KalmanFilter.cpp"
 )
 
-target_compile_features(driver_spaceoverride PRIVATE cxx_std_20)
+target_compile_features(driver_spacesync PRIVATE cxx_std_20)
 
-target_include_directories(driver_spaceoverride PRIVATE
+target_include_directories(driver_spacesync PRIVATE
     "${CMAKE_SOURCE_DIR}/include/driver"
     "${CMAKE_SOURCE_DIR}/include/shared"
 )
 
-target_link_libraries(driver_spaceoverride PRIVATE
+target_link_libraries(driver_spacesync PRIVATE
     OpenVR::Driver
     MinHook
 )
 
-set_property(TARGET driver_spaceoverride PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-set_target_properties(driver_spaceoverride PROPERTIES PREFIX "")
+set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+set_target_properties(driver_spacesync PROPERTIES PREFIX "")

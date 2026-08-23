@@ -1,6 +1,6 @@
-# OpenVR-SpaceOverride
+# SpaceSync
 
-OpenVR-SpaceOverride aligns SLAM-tracked headsets (Pico, Galaxy XR and similar) with lighthouse-tracked devices, without the drift that plagues traditional playspace calibration. Instead of computing a one-time offset between two tracking systems that slowly slide apart, it uses a Vive tracker rigidly mounted to the headset: after calibration, the driver stops using the headset's own pose and builds it from the tracker instead.
+SpaceSync (a fork of Nyabsi's [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride)) aligns SLAM-tracked headsets (Pico, Galaxy XR and similar) with lighthouse-tracked devices, without the drift that plagues traditional playspace calibration. Instead of computing a one-time offset between two tracking systems that slowly slide apart, it uses a Vive tracker rigidly mounted to the headset: after calibration, the driver stops using the headset's own pose and builds it from the tracker instead.
 
 This puts the headset and all your other lighthouse devices on the same tracking system, so there's nothing left to drift against. The SLAM tracking is still there underneath, you just get proper alignment on top of it.
 
@@ -38,6 +38,16 @@ This puts the headset and all your other lighthouse devices on the same tracking
 > **Patience is key.** If the result feels odd or misaligned after calibrating, switch to a **slower calibration speed** and re-try. Slower calibration gives the solver more data to work with and almost always produces a better result.
 
 Once it's calibrated, the headset is driven entirely by the tracker, so if you don't need the SLAM devices you can disable the headset's own tracking too. This also means the override works fine with your headset set to 3DoF mode or with its positional tracking disabled.
+
+## Follow SLAM HMD
+
+Some streamers reproject the SteamVR frame on the headset using the headset's **own** (SLAM) pose. If the headset silently re-localises, the SLAM space and the lighthouse space drift apart by a few degrees, and with the tracker driving the headset that shows up as a rotated view, black borders and hands that are no longer in front of you – until you re-calibrate.
+
+**Follow SLAM HMD** (Settings) turns the relation around: the headset keeps its own pose, the head tracker is used to *measure* the offset between the two spaces every frame, and that offset is applied to every lighthouse device (including the head tracker) instead. The view can then never rotate away from the headset; a re-localisation shows up as your trackers/controllers briefly jumping and settling back.
+
+- Calibrate exactly as before (a rigid head tracker is still required).
+- The toggle takes effect within a second and is saved in the profile.
+- The "Relative Calibration" smoothing sliders control how quickly the devices follow.
 
 ## Disable calibrated Offset
 

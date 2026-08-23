@@ -6,9 +6,10 @@
 ;--------------------------------
 ; General Configuration
 
-!define APP_VERSION "2.4.0"
-!define APP_VERSION_META "2.4.0.0"
-!define APP_NAME "OpenVR-SpaceOverride"
+!define APP_VERSION "2.5.0"
+!define APP_VERSION_META "2.5.0.0"
+!define APP_NAME "SpaceSync"
+!define LEGACY_APP_NAME "OpenVR-SpaceOverride"
 
 !define INSTALL_DIR "$PROGRAMFILES64\${APP_NAME}"
 !define LICENSE_FILE "../bin/LICENSE.txt"
@@ -25,7 +26,7 @@ ShowInstDetails show
 VIProductVersion "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${APP_NAME} Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Shinyflvres, Nyabsi"
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 
@@ -95,6 +96,16 @@ FunctionEnd
 
 Section "Install" SecInstall
 
+    ; Remove an old OpenVR-SpaceOverride install so there aren't two drivers.
+    IfFileExists "$PROGRAMFILES64\${LEGACY_APP_NAME}\Uninstall.exe" 0 nolegacy
+        DetailPrint "Removing previous OpenVR-SpaceOverride installation..."
+        ExecWait '"$PROGRAMFILES64\${LEGACY_APP_NAME}\Uninstall.exe" /S _?=$PROGRAMFILES64\${LEGACY_APP_NAME}'
+        Delete "$PROGRAMFILES64\${LEGACY_APP_NAME}\Uninstall.exe"
+        RMDir /r "$PROGRAMFILES64\${LEGACY_APP_NAME}"
+        DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_APP_NAME}"
+        Delete "$SMPROGRAMS\${LEGACY_APP_NAME}.lnk"
+    nolegacy:
+
     StrCmp $alreadyInstalled "true" 0 noupgrade
         DetailPrint "Cleaning previous installation..."
         ExecWait '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR'
@@ -107,7 +118,7 @@ Section "Install" SecInstall
 	File "${FILES_DIR}\LICENSE"
 	File "${FILES_DIR}\LICENSES"
 	File "${FILES_DIR}\manifest.vrmanifest"
-    File "${FILES_DIR}\OpenVR-SpaceOverride.exe"
+    File "${FILES_DIR}\SpaceSync.exe"
     File "${FILES_DIR}\openvr_api.dll"
     File "${FILES_DIR}\icon.png"
 
@@ -120,10 +131,10 @@ Section "Install" SecInstall
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${APP_NAME}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
 
-    CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\OpenVR-SpaceOverride.exe"
+    CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\SpaceSync.exe"
 
     Var /GLOBAL vrRuntimePath
-	nsExec::ExecToStack '"$INSTDIR\OpenVR-SpaceOverride.exe" -openvrpath'
+	nsExec::ExecToStack '"$INSTDIR\SpaceSync.exe" -openvrpath'
 	Pop $0
 	Pop $vrRuntimePath
 	DetailPrint "VR runtime path: $vrRuntimePath"
@@ -131,8 +142,8 @@ Section "Install" SecInstall
     ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
 
 	SetOutPath "$INSTDIR"
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -installmanifest'
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -activatemultipledrivers'
+	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -installmanifest'
+	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -activatemultipledrivers'
 
 SectionEnd
 
@@ -142,13 +153,13 @@ SectionEnd
 Section "Uninstall"
 
 	SetOutPath "$INSTDIR"
-	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceOverride.exe" -removemanifest'
+	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -removemanifest'
 
     Delete "$INSTDIR\LICENSE.txt"
 	Delete "$INSTDIR\LICENSE"
 	Delete "$INSTDIR\LICENSES"
 	Delete "$INSTDIR\manifest.vrmanifest"
-    Delete "$INSTDIR\OpenVR-SpaceOverride.exe"
+    Delete "$INSTDIR\SpaceSync.exe"
     Delete "$INSTDIR\openvr_api.dll"
     Delete "$INSTDIR\icon.png"
     RMDir /r "$INSTDIR\driver"
@@ -160,7 +171,7 @@ Section "Uninstall"
     RMDir "$INSTDIR"
 
     Var /GLOBAL vrRuntimePath2
-	nsExec::ExecToStack '"$INSTDIR\OpenVR-SpaceOverride.exe" -openvrpath'
+	nsExec::ExecToStack '"$INSTDIR\SpaceSync.exe" -openvrpath'
 	Pop $0
 	Pop $vrRuntimePath2
 	DetailPrint "VR runtime path: $vrRuntimePath"

@@ -93,12 +93,12 @@ protocol::Response IPCClient::Receive()
 
 void IPCClient::ConnectInternal()
 {
-	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
+	LPCTSTR pipeName = TEXT(SPACESYNC_PIPE_NAME);
 	WaitNamedPipe(pipeName, 1000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 	if (pipe == INVALID_HANDLE_VALUE)
 	{
-		throw std::runtime_error("Space Override driver unavailable. Make sure SteamVR is running, and the Space Calibrator addon is enabled in SteamVR settings.");
+		throw std::runtime_error("SpaceSync driver unavailable. Make sure SteamVR is running and the SpaceSync add-on is enabled in SteamVR settings.");
 	}
 
 	DWORD mode = PIPE_READMODE_MESSAGE;
@@ -113,7 +113,7 @@ void IPCClient::ConnectInternal()
 	if (response.type != protocol::ResponseHandshake || response.protocol.version != protocol::Version)
 	{
 		throw std::runtime_error(
-			"Incorrect driver version installed, try reinstalling OpenVR-SpaceOverride. (Client: " +
+			"Incorrect driver version installed, try reinstalling SpaceSync. (Client: " +
 			std::to_string(protocol::Version) + ", Driver: " +
 			std::to_string(response.protocol.version) + ")"
 		);

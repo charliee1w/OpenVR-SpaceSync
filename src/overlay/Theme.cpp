@@ -1,0 +1,547 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+#include "Theme.h"
+#include "EmbeddedFiles.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cfloat>
+#include <algorithm>
+
+namespace ui
+{
+	Palette P;
+	Fonts F;
+
+	static float g_displayScale = 1.0f;
+	static float g_contentScale = 1.0f;
+	static bool g_srgb = false;
+
+	void SetDisplayScale(float scale) { g_displayScale = (scale > 0.0f) ? scale : 1.0f; }
+	void SetContentScale(float scale) { g_contentScale = (scale > 0.0f) ? scale : 1.0f; }
+	float DisplayScale() { return g_displayScale; }
+	float ContentScale() { return g_contentScale; }
+	float S() { return g_displayScale * g_contentScale; }
+	float px(float designPx) { return designPx * S(); }
+
+	static float ToLinear(float c)
+	{
+		return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+	}
+
+	ImVec4 ColV(unsigned rgb, float alpha)
+	{
+		float r = ((rgb >> 16) & 0xff) / 255.0f;
+		float g = ((rgb >> 8) & 0xff) / 255.0f;
+		float b = (rgb & 0xff) / 255.0f;
+		if (g_srgb)
+		{
+			r = ToLinear(r);
+			g = ToLinear(g);
+			b = ToLinear(b);
+		}
+		return ImVec4(r, g, b, alpha);
+	}
+
+	ImU32 Col(unsigned rgb, float alpha)
+	{
+		return ImGui::ColorConvertFloat4ToU32(ColV(rgb, alpha));
+	}
+
+	void Init(float displayScale, bool srgbFramebuffer)
+	{
+		g_displayScale = displayScale;
+		g_srgb = srgbFramebuffer;
+
+		ImGuiIO& io = ImGui::GetIO();
+
+		ImFontConfig cfg;
+		cfg.PixelSnapH = false;
+		cfg.OversampleH = 2;
+		cfg.OversampleV = 2;
+
+		const float base = px(13.0f);
+		F.regular = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope400_compressed_data, (int)Manrope400_compressed_size, base, &cfg);
+		F.medium = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope500_compressed_data, (int)Manrope500_compressed_size, base, &cfg);
+		F.semibold = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope600_compressed_data, (int)Manrope600_compressed_size, base, &cfg);
+		F.bold = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope700_compressed_data, (int)Manrope700_compressed_size, base, &cfg);
+		F.mono = io.Fonts->AddFontFromMemoryCompressedTTF(JetBrainsMono400_compressed_data, (int)JetBrainsMono400_compressed_size, base, &cfg);
+		F.monoMedium = io.Fonts->AddFontFromMemoryCompressedTTF(JetBrainsMono500_compressed_data, (int)JetBrainsMono500_compressed_size, base, &cfg);
+		io.FontDefault = F.regular;
+
+		ImGuiStyle& style = ImGui::GetStyle();
+		style = ImGuiStyle();
+		style.WindowPadding = ImVec2(px(10.0f), px(8.0f));
+		style.WindowRounding = 0.0f;
+		style.WindowBorderSize = 0.0f;
+		style.PopupRounding = px(4.0f);
+		style.PopupBorderSize = 1.0f;
+		style.FramePadding = ImVec2(px(6.0f), px(4.0f));
+		style.ItemSpacing = ImVec2(0.0f, 0.0f);
+		style.ItemInnerSpacing = ImVec2(0.0f, 0.0f);
+		style.ScrollbarSize = px(10.0f);
+		style.ScrollbarRounding = px(5.0f);
+		style.FontSizeBase = base;
+
+		ImVec4* c = style.Colors;
+		c[ImGuiCol_Text] = ColV(P.text);
+		c[ImGuiCol_TextDisabled] = ColV(P.textDisabled);
+		c[ImGuiCol_WindowBg] = ColV(P.card);
+		c[ImGuiCol_ChildBg] = ColV(P.card, 0.0f);
+		c[ImGuiCol_PopupBg] = ColV(P.card);
+		c[ImGuiCol_Border] = ColV(P.borderButton);
+		c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+		c[ImGuiCol_FrameBg] = ColV(P.inputBg);
+		c[ImGuiCol_FrameBgHovered] = ColV(P.button);
+		c[ImGuiCol_FrameBgActive] = ColV(P.buttonHover);
+		c[ImGuiCol_ScrollbarBg] = ColV(P.card, 0.0f);
+		c[ImGuiCol_ScrollbarGrab] = ColV(P.borderButton);
+		c[ImGuiCol_ScrollbarGrabHovered] = ColV(P.stepHover);
+		c[ImGuiCol_ScrollbarGrabActive] = ColV(P.stepHover);
+		c[ImGuiCol_Button] = ColV(P.button);
+		c[ImGuiCol_ButtonHovered] = ColV(P.buttonHover);
+		c[ImGuiCol_ButtonActive] = ColV(P.stepHover);
+		c[ImGuiCol_ModalWindowDimBg] = ColV(P.overlay, 0.9f);
+		c[ImGuiCol_NavCursor] = ColV(P.accent, 0.0f);
+	}
+
+	void PushFont(ImFont* font, float designSize)
+	{
+		ImGui::PushFont(font ? font : F.regular, px(designSize));
+	}
+
+	void PopFont()
+	{
+		ImGui::PopFont();
+	}
+
+	ImVec2 TextSize(ImFont* font, float designSize, const char* text, float wrapDesignWidth)
+	{
+		PushFont(font, designSize);
+		ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrapDesignWidth > 0.0f ? px(wrapDesignWidth) : -1.0f);
+		PopFont();
+		return size;
+	}
+
+	void Text(ImFont* font, float designSize, unsigned rgb, const char* text)
+	{
+		PushFont(font, designSize);
+		ImGui::PushStyleColor(ImGuiCol_Text, ColV(rgb));
+		ImGui::TextUnformatted(text);
+		ImGui::PopStyleColor();
+		PopFont();
+	}
+
+	void TextWrapped(ImFont* font, float designSize, unsigned rgb, float wrapDesignWidth, const char* text)
+	{
+		PushFont(font, designSize);
+		ImGui::PushStyleColor(ImGuiCol_Text, ColV(rgb));
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + px(wrapDesignWidth));
+		ImGui::TextUnformatted(text);
+		ImGui::PopTextWrapPos();
+		ImGui::PopStyleColor();
+		PopFont();
+	}
+
+	void DrawText(ImDrawList* dl, ImFont* font, float designSize, ImVec2 pos, unsigned rgb, const char* text)
+	{
+		dl->AddText(font ? font : F.regular, px(designSize), pos, Col(rgb), text);
+	}
+
+	void DrawTextCentered(ImDrawList* dl, ImFont* font, float designSize, ImVec2 center, unsigned rgb, const char* text)
+	{
+		ImFont* f = font ? font : F.regular;
+		ImVec2 size = f->CalcTextSizeA(px(designSize), FLT_MAX, 0.0f, text);
+		dl->AddText(f, px(designSize), ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f), Col(rgb), text);
+	}
+
+	void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float designSize, ImU32 col, float designThickness)
+	{
+		const float s = px(designSize);
+		const float t = px(designThickness);
+		switch (icon)
+		{
+		case Icon::Check:
+		{
+			ImVec2 p[3] = {
+				ImVec2(c.x - 0.36f * s, c.y + 0.02f * s),
+				ImVec2(c.x - 0.10f * s, c.y + 0.28f * s),
+				ImVec2(c.x + 0.40f * s, c.y - 0.30f * s)
+			};
+			dl->AddPolyline(p, 3, col, 0, t);
+			break;
+		}
+		case Icon::Ring:
+			dl->AddCircle(c, s * 0.5f, col, 0, t);
+			break;
+		case Icon::Dot:
+			dl->AddCircleFilled(c, s * 0.5f, col);
+			break;
+		case Icon::ArrowLeft:
+		case Icon::ArrowRight:
+		case Icon::ArrowUp:
+		case Icon::ArrowDown:
+		{
+			float a = icon == Icon::ArrowRight ? 0.0f : icon == Icon::ArrowDown ? 1.5707963f : icon == Icon::ArrowLeft ? 3.1415926f : -1.5707963f;
+			auto R = [&](float x, float y) {
+				return ImVec2(c.x + (x * std::cos(a) - y * std::sin(a)) * s, c.y + (x * std::sin(a) + y * std::cos(a)) * s);
+			};
+			dl->AddLine(R(-0.45f, 0.0f), R(0.45f, 0.0f), col, t);
+			dl->AddLine(R(0.45f, 0.0f), R(0.10f, -0.33f), col, t);
+			dl->AddLine(R(0.45f, 0.0f), R(0.10f, 0.33f), col, t);
+			break;
+		}
+		case Icon::Cross:
+			dl->AddLine(ImVec2(c.x - 0.35f * s, c.y - 0.35f * s), ImVec2(c.x + 0.35f * s, c.y + 0.35f * s), col, t);
+			dl->AddLine(ImVec2(c.x - 0.35f * s, c.y + 0.35f * s), ImVec2(c.x + 0.35f * s, c.y - 0.35f * s), col, t);
+			break;
+		case Icon::Minus:
+			dl->AddLine(ImVec2(c.x - 0.4f * s, c.y), ImVec2(c.x + 0.4f * s, c.y), col, t);
+			break;
+		case Icon::Plus:
+			dl->AddLine(ImVec2(c.x - 0.4f * s, c.y), ImVec2(c.x + 0.4f * s, c.y), col, t);
+			dl->AddLine(ImVec2(c.x, c.y - 0.4f * s), ImVec2(c.x, c.y + 0.4f * s), col, t);
+			break;
+		case Icon::Square:
+			dl->AddRect(ImVec2(c.x - 0.38f * s, c.y - 0.38f * s), ImVec2(c.x + 0.38f * s, c.y + 0.38f * s), col, 0.0f, 0, t);
+			break;
+		}
+	}
+
+	bool HoverHand()
+	{
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+			return true;
+		}
+		return false;
+	}
+
+	bool TabItem(const char* label, bool active)
+	{
+		ImFont* font = active ? F.semibold : F.medium;
+		ImVec2 text = TextSize(font, 13.0f, label);
+		ImVec2 size(text.x + px(28.0f), text.y + px(22.0f));
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(label, size);
+		bool hovered = HoverHand();
+		bool clicked = ImGui::IsItemClicked();
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		unsigned color = active || hovered ? P.textStrong : P.textMuted;
+		DrawText(dl, font, 13.0f, ImVec2(p.x + px(14.0f), p.y + px(11.0f)), color, label);
+		if (active)
+			dl->AddRectFilled(ImVec2(p.x, p.y + size.y - px(2.0f)), ImVec2(p.x + size.x, p.y + size.y), Col(P.accent));
+		return clicked;
+	}
+
+	bool Button(const char* label, const ButtonOpts& o)
+	{
+		ImFont* font = o.font;
+		if (!font)
+			font = (o.kind == ButtonKind::Primary || o.kind == ButtonKind::Danger) ? F.semibold : (o.kind == ButtonKind::Ghost ? F.regular : F.medium);
+
+		ImVec2 text = TextSize(font, o.fontSize, label);
+		float w = o.width > 0.0f ? px(o.width) : std::max(text.x + 2.0f * px(o.padX), px(o.minWidth));
+		float h = text.y + 2.0f * px(o.padY);
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(label, ImVec2(w, h));
+		bool hovered = o.enabled && ImGui::IsItemHovered();
+		if (hovered)
+			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		bool clicked = o.enabled && ImGui::IsItemClicked();
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		float r = px(4.0f);
+		unsigned textColor = P.text;
+		switch (o.kind)
+		{
+		case ButtonKind::Secondary:
+			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.buttonHover : P.button), r);
+			dl->AddRect(p, ImVec2(p.x + w, p.y + h), Col(o.enabled ? P.borderButton : P.borderStrong), r);
+			textColor = o.enabled ? P.text : P.textDisabled;
+			break;
+		case ButtonKind::Primary:
+			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.accentHover : P.accent), r);
+			textColor = 0xffffff;
+			break;
+		case ButtonKind::Danger:
+			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.dangerHover : P.danger), r);
+			textColor = 0xffffff;
+			break;
+		case ButtonKind::Ghost:
+			textColor = hovered ? P.linkHover : P.link;
+			break;
+		}
+		DrawText(dl, font, o.fontSize, ImVec2(p.x + (w - text.x) * 0.5f, p.y + px(o.padY)), textColor, label);
+		return clicked;
+	}
+
+	bool Link(const char* label, float fontSize)
+	{
+		ButtonOpts o;
+		o.kind = ButtonKind::Ghost;
+		o.padX = 0.0f;
+		o.padY = 2.0f;
+		o.fontSize = fontSize;
+		return Button(label, o);
+	}
+
+	bool Checkbox(const char* label, bool* value, float rowPadY)
+	{
+		const float box = px(16.0f);
+		const float gap = px(11.0f);
+		ImVec2 text = TextSize(F.regular, 13.0f, label);
+		float h = std::max(box, text.y) + 2.0f * px(rowPadY);
+		float w = box + gap + text.x;
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(label, ImVec2(w, h));
+		HoverHand();
+		bool clicked = ImGui::IsItemClicked();
+		if (clicked)
+			*value = !*value;
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		float cy = p.y + h * 0.5f;
+		ImVec2 b0(p.x, cy - box * 0.5f), b1(p.x + box, cy + box * 0.5f);
+		float r = px(3.0f);
+		if (*value)
+		{
+			dl->AddRectFilled(b0, b1, Col(P.accent), r);
+			DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(0xffffff), 1.8f);
+		}
+		else
+		{
+			dl->AddRectFilled(b0, b1, Col(P.inputBg), r);
+			dl->AddRect(b0, b1, Col(P.checkBorder), r);
+		}
+		DrawText(dl, F.regular, 13.0f, ImVec2(p.x + box + gap, cy - text.y * 0.5f), P.text, label);
+		return clicked;
+	}
+
+	bool Radio(const char* label, bool active)
+	{
+		const float d = px(16.0f);
+		const float gap = px(11.0f);
+		ImVec2 text = TextSize(F.regular, 13.0f, label);
+		float h = std::max(d, text.y);
+		float w = d + gap + text.x;
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(label, ImVec2(w, h));
+		HoverHand();
+		bool clicked = ImGui::IsItemClicked();
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		ImVec2 c(p.x + d * 0.5f, p.y + h * 0.5f);
+		if (active)
+		{
+			dl->AddCircleFilled(c, d * 0.5f, Col(P.accent));
+			dl->AddCircleFilled(c, d * 0.5f - px(1.0f), Col(P.card));
+			dl->AddCircleFilled(c, d * 0.5f - px(4.0f), Col(P.accent));
+		}
+		else
+		{
+			dl->AddCircleFilled(c, d * 0.5f, Col(P.inputBg));
+			dl->AddCircle(c, d * 0.5f, Col(P.checkBorder), 0, 1.0f);
+		}
+		DrawText(dl, F.regular, 13.0f, ImVec2(p.x + d + gap, c.y - text.y * 0.5f), P.text, label);
+		return clicked;
+	}
+
+	void Hint(const char* text, float designWidth)
+	{
+		TextWrapped(F.regular, 12.0f, P.textDim, designWidth, text);
+	}
+
+	static bool OptionRow(const char* label, const char* hint, bool isRadio, bool on, float designWidth)
+	{
+		const float box = px(16.0f);
+		const float gap = px(11.0f);
+		const float padY = px(11.0f);
+		const float w = px(designWidth);
+		const float textW = designWidth - 16.0f - 11.0f;
+
+		ImVec2 labelSize = TextSize(F.regular, 13.0f, label);
+		ImVec2 hintSize = (hint && *hint) ? TextSize(F.regular, 12.0f, hint, textW) : ImVec2(0, 0);
+		float textH = labelSize.y + ((hint && *hint) ? px(3.0f) + hintSize.y : 0.0f);
+		float h = padY + std::max(box, textH) + padY;
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::PushID(label);
+		ImGui::InvisibleButton("##row", ImVec2(w, h));
+		ImGui::PopID();
+		HoverHand();
+		bool clicked = ImGui::IsItemClicked();
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		float cy = p.y + padY + labelSize.y * 0.5f;
+		if (isRadio)
+		{
+			ImVec2 c(p.x + box * 0.5f, cy);
+			if (on)
+			{
+				dl->AddCircleFilled(c, box * 0.5f, Col(P.accent));
+				dl->AddCircleFilled(c, box * 0.5f - px(1.0f), Col(P.card));
+				dl->AddCircleFilled(c, box * 0.5f - px(4.0f), Col(P.accent));
+			}
+			else
+			{
+				dl->AddCircleFilled(c, box * 0.5f, Col(P.inputBg));
+				dl->AddCircle(c, box * 0.5f, Col(P.checkBorder), 0, 1.0f);
+			}
+		}
+		else
+		{
+			ImVec2 b0(p.x, cy - box * 0.5f), b1(p.x + box, cy + box * 0.5f);
+			float r = px(3.0f);
+			if (on)
+			{
+				dl->AddRectFilled(b0, b1, Col(P.accent), r);
+				DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(0xffffff), 1.8f);
+			}
+			else
+			{
+				dl->AddRectFilled(b0, b1, Col(P.inputBg), r);
+				dl->AddRect(b0, b1, Col(P.checkBorder), r);
+			}
+		}
+
+		float tx = p.x + box + gap;
+		DrawText(dl, F.regular, 13.0f, ImVec2(tx, p.y + padY), P.text, label);
+		if (hint && *hint)
+			dl->AddText(F.regular, px(12.0f), ImVec2(tx, p.y + padY + labelSize.y + px(3.0f)), Col(P.textDim), hint, nullptr, px(textW));
+
+		dl->AddRectFilled(ImVec2(p.x, p.y + h - 1.0f), ImVec2(p.x + w, p.y + h), Col(P.rowRule));
+		return clicked;
+	}
+
+	bool CheckboxRow(const char* label, const char* hint, bool* value, float designWidth)
+	{
+		bool clicked = OptionRow(label, hint, false, *value, designWidth);
+		if (clicked)
+			*value = !*value;
+		return clicked;
+	}
+
+	bool RadioRow(const char* label, const char* hint, bool active, float designWidth)
+	{
+		return OptionRow(label, hint, true, active, designWidth);
+	}
+
+	bool Slider(const char* id, double* value, double minValue, double maxValue, float designWidth)
+	{
+		const float w = px(designWidth);
+		const float h = px(20.0f);
+		const float knob = px(14.0f);
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(id, ImVec2(w, h));
+		bool hovered = HoverHand();
+		bool changed = false;
+		if (ImGui::IsItemActive())
+		{
+			float mx = ImGui::GetIO().MousePos.x;
+			double t = (mx - p.x) / w;
+			t = std::min(1.0, std::max(0.0, t));
+			double v = minValue + t * (maxValue - minValue);
+			if (v != *value)
+			{
+				*value = v;
+				changed = true;
+			}
+		}
+
+		double frac = (maxValue > minValue) ? (*value - minValue) / (maxValue - minValue) : 0.0;
+		frac = std::min(1.0, std::max(0.0, frac));
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		float cy = p.y + h * 0.5f;
+		float th = px(4.0f);
+		dl->AddRectFilled(ImVec2(p.x, cy - th * 0.5f), ImVec2(p.x + w, cy + th * 0.5f), Col(P.borderStrong), th * 0.5f);
+		float kx = p.x + (float)frac * w;
+		dl->AddRectFilled(ImVec2(p.x, cy - th * 0.5f), ImVec2(kx, cy + th * 0.5f), Col(P.accent), th * 0.5f);
+		dl->AddCircleFilled(ImVec2(kx, cy), knob * 0.5f, Col(hovered || ImGui::IsItemActive() ? 0xffffff : P.knob));
+		return changed;
+	}
+
+	bool Stepper(const char* id, double* value, double step, int decimals, float designWidth)
+	{
+		const float btnW = px(28.0f), btnH = px(34.0f), gap = px(5.0f);
+		const float boxW = px(designWidth) - 2.0f * (btnW + gap);
+		bool changed = false;
+
+		ImGui::PushID(id);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton("value", ImVec2(boxW, btnH));
+		dl->AddRectFilled(p, ImVec2(p.x + boxW, p.y + btnH), Col(P.inputBg), px(4.0f));
+		dl->AddRect(p, ImVec2(p.x + boxW, p.y + btnH), Col(P.borderStrong), px(4.0f));
+		char buf[64];
+		std::snprintf(buf, sizeof buf, "%.*f", decimals, *value);
+		ImVec2 ts = TextSize(F.mono, 13.0f, buf);
+		dl->AddText(F.mono, px(13.0f), ImVec2(p.x + px(10.0f), p.y + (btnH - ts.y) * 0.5f), Col(P.textStrong), buf);
+
+		for (int i = 0; i < 2; i++)
+		{
+			ImGui::SameLine(0.0f, gap);
+			ImVec2 b = ImGui::GetCursorScreenPos();
+			ImGui::InvisibleButton(i == 0 ? "dec" : "inc", ImVec2(btnW, btnH));
+			bool hovered = HoverHand();
+			if (ImGui::IsItemClicked())
+			{
+				*value += (i == 0 ? -step : step);
+				changed = true;
+			}
+			dl->AddRectFilled(b, ImVec2(b.x + btnW, b.y + btnH), Col(hovered ? P.stepHover : P.button), px(4.0f));
+			dl->AddRect(b, ImVec2(b.x + btnW, b.y + btnH), Col(P.borderButton), px(4.0f));
+			DrawIcon(dl, i == 0 ? Icon::Minus : Icon::Plus, ImVec2(b.x + btnW * 0.5f, b.y + btnH * 0.5f), 11.0f, Col(hovered ? 0xffffff : P.textButton), 1.4f);
+		}
+
+		ImGui::PopID();
+		return changed;
+	}
+
+	bool Pill(const char* label, bool active, ImFont* font, float fontSize)
+	{
+		if (!font) font = F.mono;
+		ImVec2 text = TextSize(font, fontSize, label);
+		ImVec2 size(text.x + 2.0f * px(10.0f), text.y + 2.0f * px(5.0f));
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(label, size);
+		bool hovered = HoverHand();
+		bool clicked = ImGui::IsItemClicked();
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		float r = px(4.0f);
+		dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), Col(active ? P.accent : (hovered ? P.buttonHover : P.button)), r);
+		dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), Col(active ? P.accent : P.borderButton), r);
+		DrawText(dl, font, fontSize, ImVec2(p.x + px(10.0f), p.y + px(5.0f)), active ? 0xffffff : P.textMuted, label);
+		return clicked;
+	}
+
+	void HLine(float designWidth, unsigned rgb)
+	{
+		ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + px(designWidth), p.y + 1.0f), Col(rgb ? rgb : P.border));
+		ImGui::Dummy(ImVec2(px(designWidth), 1.0f));
+	}
+
+	void VSpace(float designPx)
+	{
+		ImGui::Dummy(ImVec2(0.0f, px(designPx)));
+	}
+
+	void SectionHeader(const char* label, float designWidth)
+	{
+		Text(F.semibold, 12.5f, P.textMuted, label);
+		VSpace(9.0f);
+		HLine(designWidth);
+		VSpace(10.0f);
+	}
+}

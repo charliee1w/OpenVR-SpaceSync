@@ -37,3 +37,10 @@ cmake-build-*
 
 # Build Artifacts
 build
+
+# Installer inputs staged into bin/ by build.bat (copies of resources/)
+bin/LICENSE
+bin/LICENSE.txt
+bin/LICENSES
+bin/icon.png
+bin/manifest.vrmanifest

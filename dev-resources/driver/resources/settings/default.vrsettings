@@ -1,5 +1,5 @@
 {
-	"driver_spaceoverride": {
+	"driver_spacesync": {
 		"loadPriority": 9999
 	}
 }

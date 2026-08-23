@@ -21,6 +21,9 @@ public:
     [[nodiscard]] auto WindowData() -> Vulkan_Window* { return &window_data_; };
     [[nodiscard]] auto Shown() const -> bool { return window_shown_; };
     [[nodiscard]] auto Minimized() const -> bool { return window_minimized_; };
+    [[nodiscard]] auto Width() const -> int { return width_; };
+    [[nodiscard]] auto Height() const -> int { return height_; };
+    [[nodiscard]] auto UiScale() const -> float { return ui_scale_; };
 
     auto Hide() -> void;
     auto Show() -> void;
@@ -30,11 +33,13 @@ public:
     auto Destroy(VulkanRenderer*& renderer) -> void;
 
 private:
+    static SDL_HitTestResult HitTest(SDL_Window* window, const SDL_Point* area, void* data);
 
     SDL_Window* window_;
     Vulkan_Window window_data_;
     int width_;
     int height_;
+    float ui_scale_ = 1.0f;
     bool window_shown_;
     bool window_minimized_;
     UserInterface m_userInterface_;

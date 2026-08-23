@@ -8,6 +8,9 @@
 
 #include <openvr_driver.h>
 
+#include <atomic>
+#include <mutex>
+
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
 public:
@@ -46,9 +49,62 @@ public:
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
+	// confidence 0..1 = how much this sample may move the drift estimate.
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
-		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3]);
+		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double confidence);
+
+	// Drift changes slowly, but fast head motion makes a single sample unreliable, so weight by speed.
+	static double DriftSampleConfidence(double linSpeed, double angSpeed)
+	{
+		// Fast head motion: don't touch the drift at all, it gets re-measured once the head is calm.
+		const double linFreeze = 1.0;  // m/s
+		const double angFreeze = 1.0;  // rad/s
+		if (linSpeed > linFreeze || angSpeed > angFreeze)
+			return 0.0;
+
+		const double linRef = 0.5;   // m/s   -> weight 0.5
+		const double angRef = 0.4;   // rad/s -> weight 0.5
+		double l = linSpeed / linRef, a = angSpeed / angRef;
+		return 1.0 / (1.0 + l * l + a * a);
+	}
+
+	// Leftover time offset between headset pose and tracker pose (streamers pre-predict), learned
+	// while the head turns: yaw residual r ~= omega * (tau - tau_true), so nudge tau by -r/omega.
+	struct LatencyEstimate
+	{
+		double tau = 0.0;           // seconds, on top of the reported time offsets
+		bool primed = false;
+		LARGE_INTEGER lastUpdate = {};
+
+		void reset() { tau = 0.0; primed = false; }
+	} latency;
 	void ApplyDrift(vr::DriverPose_t &pose) const;
+	void ApplyInverseDrift(vr::DriverPose_t &pose) const;
+	void NoteTrackerState(bool trackerOK, bool usingSlam, const vr::TrackedDevicePose_t &tp,
+		double trackerYawDeg, bool relativeYawValid, double relativeYawDeg);
+
+	// Raw head tracker pose grabbed in the hook. Follow mode needs it because the tracker is
+	// re-aligned in vrserver and can't be read back raw. Lighthouse thread writes, HMD thread reads.
+	struct TrackerSample
+	{
+		bool valid = false;
+		bool poseIsValid = false;
+		bool deviceIsConnected = false;
+		vr::ETrackingResult result = vr::TrackingResult_Uninitialized;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		double position[3] = { 0, 0, 0 };
+		double velocity[3] = { 0, 0, 0 };         // world space, m/s
+		double angularVelocity[3] = { 0, 0, 0 };  // world space, rad/s (axis-angle rate)
+		double linSpeed = 0.0;
+		double angSpeed = 0.0;
+		double poseTimeOffset = 0.0;              // seconds, as reported by the driver
+		LARGE_INTEGER time = {};                  // when the sample was received
+	};
+	std::mutex trackerSampleMutex;
+	TrackerSample trackerSample;
+
+	void StoreTrackerSample(const vr::DriverPose_t &pose);
+	TrackerSample LoadTrackerSample();
 
 	double SlamToCorrectedScale() const
 	{
@@ -70,8 +126,11 @@ private:
 
 	struct HmdTracker
 	{
-		bool enabled = false;
+		// Written last / read first so the pose thread never sees a half-written config.
+		std::atomic<bool> enabled{ false };
 		bool native = false;
+		// Follow SLAM HMD: headset keeps its SLAM pose, lighthouse devices follow it.
+		bool followSlam = false;
 		bool slamFallback = true;
 		bool enableAngularVelocity = false;
 		float predictionTime = 1.0f;
@@ -124,4 +183,31 @@ private:
 
 		void reset() { valid = false; filter.reset(); }
 	} headVel;
+
+	// Only for logging tracker state changes (OK <-> lost) with the yaw numbers around them.
+	struct TrackerState
+	{
+		bool primed = false;
+		bool wasOK = false;
+		bool wasFallback = false;
+		vr::ETrackingResult lastResult = vr::TrackingResult_Uninitialized;
+		LARGE_INTEGER lostAt = {};
+		double trackerYawAtLoss = 0.0;      // raw tracker yaw (deg)
+		double relativeYawAtLoss = 0.0;     // drift yaw (deg)
+		bool relativeYawAtLossValid = false;
+
+		void reset() { primed = false; wasOK = false; wasFallback = false; lastResult = vr::TrackingResult_Uninitialized; relativeYawAtLossValid = false; }
+	} trackerState;
+
+	// Last logged drift, so a jump of the SLAM<->lighthouse relation shows up in the log.
+	struct DriftLog
+	{
+		bool primed = false;
+		double yawDeg = 0.0;
+		vr::HmdVector3d_t translation = { 0, 0, 0 };
+		double tauMs = 0.0;
+		LARGE_INTEGER lastLog = {};
+
+		void reset() { primed = false; }
+	} driftLog;
 };

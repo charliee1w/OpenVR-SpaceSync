@@ -8,11 +8,11 @@
 #include <openvr_driver.h>
 #endif
 
-#define OPENVR_SPACECALIBRATOR_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceOverrideCom"
+#define SPACESYNC_PIPE_NAME "\\\\.\\pipe\\SpaceSyncCom"
 
 namespace protocol
 {
-	const uint32_t Version = 7;
+	const uint32_t Version = 8;
 
 	enum RequestType
 	{
@@ -82,6 +82,8 @@ namespace protocol
 		double calibrationScale;
 		// Headset tracking space scale relative to the head tracker's lighthouse space.
 		double hmdScale;
+		// Follow SLAM HMD: headset keeps its SLAM pose, lighthouse devices (incl. head tracker) follow it.
+		bool followSlamHmd;
 	};
 
 	struct SetSlamSync

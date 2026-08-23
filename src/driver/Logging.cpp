@@ -8,7 +8,7 @@ FILE *LogFile;
 
 void OpenLogFile()
 {
-	LogFile = fopen("space_calibrator_driver.log", "a");
+	LogFile = fopen("spacesync_driver.log", "a");
 	if (LogFile == nullptr)
 	{
 		LogFile = stderr;

@@ -28,7 +28,8 @@ namespace oneeuro {
 
 		void reset() { initialized = false; }
 
-		vr::HmdVector3d_t filter(const vr::HmdVector3d_t& x, double dt) {
+		// confidence 0..1: 1 = normal One Euro, 0 = ignore this sample.
+		vr::HmdVector3d_t filter(const vr::HmdVector3d_t& x, double dt, double confidence = 1.0) {
 			if (!initialized) {
 				value = x;
 				deriv = { 0, 0, 0 };
@@ -36,14 +37,17 @@ namespace oneeuro {
 				return value;
 			}
 
-			double aDeriv = alpha(params.dCutoff, dt);
+			if (confidence < 0.0) confidence = 0.0;
+			if (confidence > 1.0) confidence = 1.0;
+
+			double aDeriv = alpha(params.dCutoff, dt) * confidence;
 			for (int i = 0; i < 3; i++) {
 				double rawDeriv = (x.v[i] - value.v[i]) / dt;
 				deriv.v[i] = aDeriv * rawDeriv + (1.0 - aDeriv) * deriv.v[i];
 			}
 
 			double speed = std::sqrt(deriv.v[0] * deriv.v[0] + deriv.v[1] * deriv.v[1] + deriv.v[2] * deriv.v[2]);
-			double aValue = alpha(params.minCutoff + params.beta * speed, dt);
+			double aValue = alpha(params.minCutoff + params.beta * speed, dt) * confidence;
 			for (int i = 0; i < 3; i++)
 				value.v[i] = aValue * x.v[i] + (1.0 - aValue) * value.v[i];
 
@@ -59,7 +63,8 @@ namespace oneeuro {
 
 		void reset() { initialized = false; }
 
-		vr::HmdQuaternion_t filter(vr::HmdQuaternion_t x, double dt) {
+		// confidence 0..1, same as Vec3::filter.
+		vr::HmdQuaternion_t filter(vr::HmdQuaternion_t x, double dt, double confidence = 1.0) {
 			x = normalize(x);
 			if (!initialized) {
 				value = x;
@@ -67,6 +72,9 @@ namespace oneeuro {
 				initialized = true;
 				return value;
 			}
+
+			if (confidence < 0.0) confidence = 0.0;
+			if (confidence > 1.0) confidence = 1.0;
 
 			double dot = value.w * x.w + value.x * x.x + value.y * x.y + value.z * x.z;
 			if (dot < 0.0) {
@@ -76,10 +84,10 @@ namespace oneeuro {
 			if (dot > 1.0) dot = 1.0;
 
 			double rawSpeed = (2.0 * std::acos(dot)) / dt;
-			double aDeriv = alpha(params.dCutoff, dt);
+			double aDeriv = alpha(params.dCutoff, dt) * confidence;
 			speed = aDeriv * rawSpeed + (1.0 - aDeriv) * speed;
 
-			double aValue = alpha(params.minCutoff + params.beta * speed, dt);
+			double aValue = alpha(params.minCutoff + params.beta * speed, dt) * confidence;
 			value = slerp(value, x, aValue);
 			return value;
 		}

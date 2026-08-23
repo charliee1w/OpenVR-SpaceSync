@@ -41,6 +41,7 @@ struct CalibrationContext
 
 	bool enabled = false;
 	bool validProfile = false;
+	bool lastCalibrationOk = false;   // did the last calibration run succeed
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
@@ -48,7 +49,9 @@ struct CalibrationContext
 	bool fallbackToSlam = true;
 	bool enableAngularVelocity = false;
 	bool continuousSync = true;
+	bool followSlamHmd = false;
 	float predictionTime = 1.0f;
+	float uiScale = 1.25f;            // UI content scale
 
 	bool headFilterEnabled = false;
 	protocol::OneEuroParams headFilterParams = { 5.0, 0.8, 1.0 };
@@ -152,6 +155,7 @@ extern CalibrationContext CalCtx;
 void InitCalibrator();
 void CalibrationTick(double time);
 void StartCalibration();
+void CancelCalibration();   // abort a running calibration, restore the saved profile
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 void SendOneEuroParams();

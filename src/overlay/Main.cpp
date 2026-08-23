@@ -56,12 +56,12 @@ static bool g_dashboard_was_visible = false;
 static bool g_tracking_lost = false;
 static uint64_t g_tracking_lost_time = 0;
 
-#define APP_KEY     "Nyabsi.SpaceOverride"
-#define APP_NAME    "Space Override"
-#define NOTIFY_KEY  "Nyabsi.SpaceOverrideNotifier"
+#define APP_KEY     "Shinyflvres.SpaceSync"
+#define APP_NAME    "SpaceSync"
+#define NOTIFY_KEY  "Shinyflvres.SpaceSyncNotifier"
 
-#define WIN_WIDTH   1200
-#define WIN_HEIGHT  800
+#define WIN_WIDTH   1080
+#define WIN_HEIGHT  700
 
 static auto HandleCommandLine(int argc, char** argv) -> void;
 
@@ -101,7 +101,7 @@ static auto ActivateMultipleDrivers() -> void
 
 static auto CreateNotificationOverlay() -> void
 {
-    vr::VROverlay()->CreateOverlay(NOTIFY_KEY, "Space Override Notification", &g_notifyOverlayHandle);
+    vr::VROverlay()->CreateOverlay(NOTIFY_KEY, "SpaceSync Notification", &g_notifyOverlayHandle);
 
     vr::HmdMatrix34_t m = {
         1.0f, 0.0f, 0.0f,  0.0f,
@@ -326,7 +326,7 @@ int main(int argc, char** argv)
         if (g_imGuiWindow->Shown() && !is_minimized) {
             if (g_vulkanRenderer->ShouldRebuildSwapchain()) {
                 ImGui_ImplVulkan_SetMinImageCount(g_vulkanRenderer->MinimumConcurrentImageCount());
-                g_vulkanRenderer->SetupSwapchain(g_imGuiWindow->WindowData(), WIN_WIDTH, WIN_HEIGHT);
+                g_vulkanRenderer->SetupSwapchain(g_imGuiWindow->WindowData(), g_imGuiWindow->Width(), g_imGuiWindow->Height());
             }
             g_vulkanRenderer->BlitToWindow(g_imGuiWindow->WindowData());
             g_vulkanRenderer->Present(g_imGuiWindow->WindowData());

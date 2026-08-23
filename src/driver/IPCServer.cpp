@@ -82,7 +82,7 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 void IPCServer::RunThread(IPCServer *_this)
 {
 	_this->running = true;
-	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
+	LPCTSTR pipeName = TEXT(SPACESYNC_PIPE_NAME);
 
 	HANDLE connectEvent = _this->connectEvent = CreateEvent(0, TRUE, TRUE, 0);
 	if (!connectEvent)
@@ -147,7 +147,7 @@ void IPCServer::RunThread(IPCServer *_this)
 BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
 {
 	pipe = CreateNamedPipe(
-		TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME),
+		TEXT(SPACESYNC_PIPE_NAME),
 		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		PIPE_UNLIMITED_INSTANCES,

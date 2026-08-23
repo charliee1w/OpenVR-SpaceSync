@@ -521,6 +521,7 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.calibrationTranslation = VRTranslationVec(CalCtx.calibratedTranslation);
 	req.setHmdTracker.calibrationScale = CalCtx.calibratedScale;
 	req.setHmdTracker.hmdScale = CalCtx.hmdScale;
+	req.setHmdTracker.followSlamHmd = CalCtx.followSlamHmd;
 	Driver.SendBlocking(req);
 }
 
@@ -592,36 +593,41 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
+	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid;
+
+	// Follow mode: send the HMD command first so the driver is already in follow mode when the
+	// head tracker gets its transform. Otherwise transforms first, HMD command last.
+	bool hmdCommandSent = false;
+	if (overrideActive && ctx.followSlamHmd)
+	{
+		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, ctx.targetID, true);
+		hmdCommandSent = true;
+	}
+
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 
-		// The headset is driven from the tracker, so every device keeps its raw pose;
-		// clear any space-warp offset that an older profile may have applied.
-		ResetAndDisableOffsets(id);
+		// One message per device. Disable-then-enable would let a frame through untransformed.
+		bool applyCalibration = false;
 
-		if (!ctx.enabled)
-			continue;
-
-		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-
-		if (err != vr::TrackedProp_Success)
-			continue;
-
-		std::string trackingSystem(buffer);
-
-		if (id == vr::k_unTrackedDeviceIndex_Hmd)
-			continue;
-
-		if (deviceClass == vr::TrackedDeviceClass_GenericTracker && trackingSystem == ctx.targetTrackingSystem && id == ctx.targetID)
+		if (ctx.enabled && id != vr::k_unTrackedDeviceIndex_Hmd)
 		{
-			continue;
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
+
+			if (err == vr::TrackedProp_Success && std::string(buffer) == ctx.targetTrackingSystem)
+			{
+				// Head tracker stays raw while it drives the headset, in follow mode it's aligned like the rest.
+				bool isHeadTracker = deviceClass == vr::TrackedDeviceClass_GenericTracker && id == ctx.targetID;
+				applyCalibration = !isHeadTracker || ctx.followSlamHmd;
+			}
 		}
 
-		if (trackingSystem == ctx.targetTrackingSystem) {
+		if (applyCalibration)
+		{
 			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id) / ctx.targetModelScale;
 			protocol::Request req(protocol::RequestSetDeviceTransform);
 			req.setDeviceTransform = {
@@ -633,9 +639,12 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			};
 			Driver.SendBlocking(req);
 		}
+		else
+		{
+			// Everything else stays raw.
+			ResetAndDisableOffsets(id);
+		}
 	}
-
-	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid;
 
 	for (uint32_t id = 0; overrideActive && id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
@@ -643,7 +652,9 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 
+		// Follow mode: the world is SLAM space already, SLAM devices need no sync.
 		bool sync = ctx.continuousSync
+			&& !ctx.followSlamHmd
 			&& id != vr::k_unTrackedDeviceIndex_Hmd
 			&& deviceClass != vr::TrackedDeviceClass_TrackingReference;
 
@@ -659,13 +670,12 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		Driver.SendBlocking(req);
 	}
 
-	if (overrideActive)
+	if (!hmdCommandSent)
 	{
-		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, ctx.targetID, true);
-	}
-	else
-	{
-		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, false);
+		if (overrideActive)
+			SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, ctx.targetID, true);
+		else
+			SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, false);
 	}
 
 	SendOneEuroParams();
@@ -708,6 +718,7 @@ static int coplanarRetries = 0;
 
 void StartCalibration()
 {
+	CalCtx.lastCalibrationOk = false;
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
@@ -725,6 +736,17 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	ctx.state = CalibrationState::None;
 	collectedSamples.clear();
 	coplanarRetries = 0;
+}
+
+void CancelCalibration()
+{
+	auto &ctx = CalCtx;
+	if (ctx.state != CalibrationState::Begin && ctx.state != CalibrationState::Detect && ctx.state != CalibrationState::Sampling)
+		return;
+
+	ctx.Log("Calibration cancelled by user\n");
+	Detection.Clear();
+	AbortAndRestoreProfile(ctx);
 }
 
 void CalibrationTick(double time)
@@ -952,6 +974,7 @@ void CalibrationTick(double time)
 		ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
 
 		ctx.validProfile = true;
+		ctx.lastCalibrationOk = true;
 		SaveProfile(ctx);
 		CalCtx.Log("Finished calibration, profile saved\n");
 
