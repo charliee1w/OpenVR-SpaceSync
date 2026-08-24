@@ -1,5 +1,10 @@
 # SpaceSync
 
+> **Heads up:** OpenVR-SpaceSync is a modified version of
+> [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride) by Nyabsi (Copyright (C) 2026 Nyabsi,
+> AGPL-3.0). Modifications to the original work were made beginning on 2026-08-23 by Shinyflvres.
+> What changed is listed in [NOTICE.md](NOTICE.md). The license stays AGPL-3.0, see [LICENSE](LICENSE).
+
 SpaceSync keeps your lighthouse gear (Vive/Tundra trackers, Index controllers, base stations) lined up with a SLAM headset (Galaxy XR, Quest, Pico, anything streamed through Virtual Desktop, Steam Link, ALVR and friends). It needs one tracker mounted on the headset. That tracker tells the driver how the two tracking systems relate every frame, so nothing drifts apart over time.
 
 It is a fork of Nyabsi's [OpenVR SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride), which itself grew out of pushrax's [OpenVR SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator). Big thanks to both.

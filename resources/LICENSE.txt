@@ -13,3 +13,8 @@ GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SpaceSync is a modified version of OpenVR-SpaceOverride.
+Modifications Copyright (C) 2026 Shinyflvres, first modified release 2026-08-23.
+The license is unchanged (AGPL-3.0-only). See NOTICE.md in the source repository
+(https://github.com/shinyflvre/OpenVR-SpaceSync) for the list of changes.

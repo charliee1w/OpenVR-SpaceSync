@@ -1,3 +1,4 @@
+; Modified by Shinyflvres, 2026-08-23. Part of SpaceSync, a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). See NOTICE.md
 ;--------------------------------
 ; Include Modern UI
 
@@ -26,7 +27,8 @@ ShowInstDetails show
 VIProductVersion "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${APP_NAME} Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Shinyflvres, Nyabsi"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi. SpaceSync modifications Copyright (c) 2026 Shinyflvres. AGPL-3.0"
+VIAddVersionKey /LANG=1033 "Comments" "SpaceSync is a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0), modified by Shinyflvres on 2026-08-23. See NOTICE.md."
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 
@@ -115,6 +117,7 @@ Section "Install" SecInstall
     SetOutPath "$INSTDIR"
 
     File "${FILES_DIR}\LICENSE.txt"
+    File "${FILES_DIR}\NOTICE.md"
 	File "${FILES_DIR}\LICENSE"
 	File "${FILES_DIR}\LICENSES"
 	File "${FILES_DIR}\manifest.vrmanifest"
@@ -156,6 +159,7 @@ Section "Uninstall"
 	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -removemanifest'
 
     Delete "$INSTDIR\LICENSE.txt"
+    Delete "$INSTDIR\NOTICE.md"
 	Delete "$INSTDIR\LICENSE"
 	Delete "$INSTDIR\LICENSES"
 	Delete "$INSTDIR\manifest.vrmanifest"

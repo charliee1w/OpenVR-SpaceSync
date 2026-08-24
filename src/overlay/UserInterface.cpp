@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+// Modified by Shinyflvres, 2026-08-23. Part of SpaceSync, a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). See NOTICE.md
 
 #include "UserInterface.h"
 #include "Calibration.h"
@@ -14,7 +15,7 @@
 
 using namespace ui;
 
-static const char* kCreditLine = "OpenVR SpaceSync Beta - by Shinyflvres. (Special thanks to Nyabsi and tach/pushrax for SpaceOverride and SpaceCalibrator)";
+static const char* kCreditLine = "SpaceSync Beta by Shinyflvres. A modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). Thanks to tach/pushrax for SpaceCalibrator.";
 
 namespace
 {

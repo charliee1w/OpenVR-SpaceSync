@@ -1,3 +1,4 @@
+# Modified by Shinyflvres, 2026-08-23. Part of SpaceSync, a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). See NOTICE.md
 cmake_minimum_required(VERSION 3.20)
 
 if (POLICY CMP0141)

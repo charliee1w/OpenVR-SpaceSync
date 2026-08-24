@@ -1,3 +1,4 @@
+REM Added by Shinyflvres, 2026-08-23. Part of SpaceSync, a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). See NOTICE.md
 @echo off
 setlocal EnableDelayedExpansion
 REM ---------------------------------------------------------------------------
@@ -98,6 +99,7 @@ if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
 copy /Y "%BUILD_DIR%\SpaceSync.exe" "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\LICENSE"             "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\LICENSE.txt"         "%ROOT%\bin\" >nul || goto :fail
+copy /Y "%ROOT%\NOTICE.md"                    "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\LICENSES"            "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\manifest.vrmanifest" "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\icon.png"            "%ROOT%\bin\" >nul || goto :fail
