@@ -421,6 +421,17 @@ void UserInterface::RenderCalibration(const Status& status)
 	if (Button("Remove Calibration", remove))
 		confirmRemove_ = true;
 
+	if (calibrated && CalCtx.driverStatus.mountShiftSuspected)
+	{
+		VSpace(18.0f);
+		char warn[192];
+		std::snprintf(warn, sizeof warn, "The head tracker seems to have moved on the headset (tilt %.1f deg, offset %.1f cm). Please recalibrate.",
+			CalCtx.driverStatus.tiltDeg, CalCtx.driverStatus.translationDeviationM * 100.0);
+		ImVec2 ws = TextSize(F.regular, 13.0f, warn);
+		ImGui::SetCursorScreenPos(ImVec2(c.x - ws.x * 0.5f, ImGui::GetCursorScreenPos().y));
+		Text(F.regular, 13.0f, P.yellow, warn);
+	}
+
 	VSpace(16.0f);
 }
 

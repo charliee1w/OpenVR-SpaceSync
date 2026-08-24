@@ -681,6 +681,18 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 	SendOneEuroParams();
 
+	try
+	{
+		protocol::Request statusReq(protocol::RequestGetStatus);
+		protocol::Response statusResp = Driver.SendBlocking(statusReq);
+		if (statusResp.type == protocol::ResponseStatus)
+			ctx.driverStatus = statusResp.status;
+	}
+	catch (const std::runtime_error &e)
+	{
+		std::cerr << "Failed to read driver status: " << e.what() << std::endl;
+	}
+
 	if (ctx.enabled && ctx.chaperone.valid && ctx.chaperone.autoApply)
 	{
 		uint32_t quadCount = 0;

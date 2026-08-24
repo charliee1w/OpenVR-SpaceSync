@@ -47,6 +47,7 @@ public:
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
 	void SetOneEuro(const protocol::SetOneEuro &cmd);
+	void GetStatus(protocol::DriverStatus &status);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
@@ -199,6 +200,27 @@ private:
 
 		void reset() { primed = false; wasOK = false; wasFallback = false; lastResult = vr::TrackingResult_Uninitialized; relativeYawAtLossValid = false; }
 	} trackerState;
+
+	struct JumpDetector
+	{
+		int pending = 0;
+		vr::HmdQuaternion_t firstRotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t firstTranslation = { 0, 0, 0 };
+		uint32_t compensated = 0;
+
+		void reset() { pending = 0; }
+	} jump;
+
+	struct MountCheck
+	{
+		bool primed = false;
+		double tiltDeg = 0.0;
+		double translationDeviation = 0.0;
+		vr::HmdVector3d_t meanTranslation = { 0, 0, 0 };
+		bool suspected = false;
+
+		void reset() { primed = false; tiltDeg = 0.0; translationDeviation = 0.0; suspected = false; }
+	} mount;
 
 	// Last logged drift, so a jump of the SLAM<->lighthouse relation shows up in the log.
 	struct DriftLog

@@ -43,6 +43,7 @@ struct CalibrationContext
 	bool enabled = false;
 	bool validProfile = false;
 	bool lastCalibrationOk = false;   // did the last calibration run succeed
+	protocol::DriverStatus driverStatus = {};
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 

@@ -202,6 +202,8 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		trackerState.reset();
 		driftLog.reset();
 		latency.reset();
+		jump.reset();
+		mount.reset();
 		{
 			std::lock_guard<std::mutex> lock(trackerSampleMutex);
 			trackerSample.valid = false;
@@ -243,27 +245,103 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
 	const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3], double confidence)
 {
-	vr::HmdQuaternion_t instRot = quaternionProjectYaw(quaternionNormalize(correctedRotation * quaternionConjugate(rawRotation)));
+	vr::HmdQuaternion_t relation = quaternionNormalize(correctedRotation * quaternionConjugate(rawRotation));
+	vr::HmdQuaternion_t instRot = quaternionProjectYaw(relation);
 
 	double dt = FilterStep(drift.lastUpdate, drift.valid);
-
-	// Filter the rotation first and derive the translation from the filtered rotation,
-	// otherwise rotation and translation don't fit together while the filter settles.
-	drift.rotation = drift.rotationFilter.filter(instRot, dt, confidence);
-
-	vr::HmdVector3d_t rotatedRaw = quaternionRotateVector(drift.rotation, rawPosition);
-
 	double slamScale = SlamToCorrectedScale();
-	vr::HmdVector3d_t instTrans = {
-		correctedPosition[0] - rotatedRaw.v[0] * slamScale,
-		correctedPosition[1] - rotatedRaw.v[1] * slamScale,
-		correctedPosition[2] - rotatedRaw.v[2] * slamScale
+	const bool calm = confidence > 0.5;
+
+	auto translationFor = [&](const vr::HmdQuaternion_t& rot) {
+		vr::HmdVector3d_t rotatedRaw = quaternionRotateVector(rot, rawPosition);
+		return vr::HmdVector3d_t{
+			correctedPosition[0] - rotatedRaw.v[0] * slamScale,
+			correctedPosition[1] - rotatedRaw.v[1] * slamScale,
+			correctedPosition[2] - rotatedRaw.v[2] * slamScale
+		};
+	};
+	auto distance = [](const vr::HmdVector3d_t& a, const vr::HmdVector3d_t& b) {
+		double dx = a.v[0] - b.v[0], dy = a.v[1] - b.v[1], dz = a.v[2] - b.v[2];
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
 	};
 
+	if (drift.valid)
+	{
+		vr::HmdVector3d_t instTrans = translationFor(instRot);
+		double dYaw = std::fabs(wrapDeg(quaternionYawDeg(instRot) - quaternionYawDeg(drift.rotation)));
+		double dTrans = distance(instTrans, drift.translation);
+
+		if (calm && (dYaw > 2.0 || dTrans > 0.05))
+		{
+			bool consistent = jump.pending > 0
+				&& std::fabs(wrapDeg(quaternionYawDeg(instRot) - quaternionYawDeg(jump.firstRotation))) < 1.0
+				&& distance(instTrans, jump.firstTranslation) < 0.02;
+			if (consistent)
+				jump.pending++;
+			else
+			{
+				jump.firstRotation = instRot;
+				jump.firstTranslation = instTrans;
+				jump.pending = 1;
+			}
+
+			if (jump.pending >= 3)
+			{
+				LOG("Drift jump compensated: yaw %.2f -> %.2f deg, translation delta %.1f cm",
+					quaternionYawDeg(drift.rotation), quaternionYawDeg(instRot), dTrans * 100.0);
+				drift.rotationFilter.snap(instRot);
+				drift.translationFilter.snap(instTrans);
+				drift.rotation = instRot;
+				drift.translation = instTrans;
+				mount.meanTranslation = instTrans;
+				jump.pending = 0;
+				jump.compensated++;
+				driftLog.yawDeg = quaternionYawDeg(instRot);
+				driftLog.translation = instTrans;
+				return;
+			}
+		}
+		else
+			jump.pending = 0;
+	}
+
+	drift.rotation = drift.rotationFilter.filter(instRot, dt, confidence);
+	vr::HmdVector3d_t instTrans = translationFor(drift.rotation);
 	drift.translation = drift.translationFilter.filter(instTrans, dt, confidence);
 	drift.valid = true;
 
-	// Log when the drift jumps (>1 deg yaw or >5 cm), max once a second. Makes silent SLAM re-localisations visible.
+	if (calm)
+	{
+		vr::HmdQuaternion_t swing = quaternionNormalize(relation * quaternionConjugate(instRot));
+		double tilt = 2.0 * std::atan2(std::sqrt(swing.x * swing.x + swing.y * swing.y + swing.z * swing.z), std::fabs(swing.w)) * 180.0 / 3.14159265358979323846;
+
+		if (!mount.primed)
+		{
+			mount.primed = true;
+			mount.tiltDeg = tilt;
+			mount.meanTranslation = drift.translation;
+			mount.translationDeviation = 0.0;
+		}
+		else
+		{
+			double kFast = dt / 10.0 > 1.0 ? 1.0 : dt / 10.0;
+			double kSlow = dt / 60.0 > 1.0 ? 1.0 : dt / 60.0;
+			mount.tiltDeg += kFast * (tilt - mount.tiltDeg);
+			double dev = distance(drift.translation, mount.meanTranslation);
+			mount.translationDeviation += kFast * (dev - mount.translationDeviation);
+			for (int i = 0; i < 3; i++)
+				mount.meanTranslation.v[i] += kSlow * (drift.translation.v[i] - mount.meanTranslation.v[i]);
+		}
+
+		bool was = mount.suspected;
+		if (!mount.suspected && (mount.tiltDeg > 3.0 || mount.translationDeviation > 0.03))
+			mount.suspected = true;
+		else if (mount.suspected && mount.tiltDeg < 2.0 && mount.translationDeviation < 0.02)
+			mount.suspected = false;
+		if (was != mount.suspected)
+			LOG("Mount check: %s (tilt %.2f deg, translation deviation %.1f cm)", mount.suspected ? "tracker may have moved on the headset" : "back to normal", mount.tiltDeg, mount.translationDeviation * 100.0);
+	}
+
 	double yawDeg = quaternionYawDeg(drift.rotation);
 	LARGE_INTEGER now, freq;
 	QueryPerformanceCounter(&now);
@@ -282,10 +360,7 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 	else
 	{
 		double dYaw = wrapDeg(yawDeg - driftLog.yawDeg);
-		double dx = drift.translation.v[0] - driftLog.translation.v[0];
-		double dy = drift.translation.v[1] - driftLog.translation.v[1];
-		double dz = drift.translation.v[2] - driftLog.translation.v[2];
-		double dTrans = std::sqrt(dx * dx + dy * dy + dz * dz);
+		double dTrans = distance(drift.translation, driftLog.translation);
 		double dTau = tauMs - driftLog.tauMs;
 		double sinceLog = (now.QuadPart - driftLog.lastLog.QuadPart) / (double)freq.QuadPart;
 
@@ -302,6 +377,16 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 			driftLog.lastLog = now;
 		}
 	}
+}
+
+void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
+{
+	status.driftValid = drift.valid;
+	status.mountShiftSuspected = mount.suspected;
+	status.tiltDeg = mount.tiltDeg;
+	status.translationDeviationM = mount.translationDeviation;
+	status.latencyMs = latency.tau * 1000.0;
+	status.jumpsCompensated = jump.compensated;
 }
 
 void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const

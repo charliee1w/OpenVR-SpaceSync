@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 8;
+	const uint32_t Version = 9;
 
 	enum RequestType
 	{
@@ -23,6 +23,7 @@ namespace protocol
 		RequestSetHmdTracker,
 		RequestSetSlamSync,
 		RequestSetOneEuro,
+		RequestGetStatus,
 	};
 
 	enum ResponseType
@@ -30,6 +31,7 @@ namespace protocol
 		ResponseInvalid,
 		ResponseHandshake,
 		ResponseSuccess,
+		ResponseStatus,
 	};
 
 	struct Protocol
@@ -107,6 +109,16 @@ namespace protocol
 		OneEuroParams drift;
 	};
 
+	struct DriverStatus
+	{
+		bool driftValid;
+		bool mountShiftSuspected;
+		double tiltDeg;
+		double translationDeviationM;
+		double latencyMs;
+		uint32_t jumpsCompensated;
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -128,6 +140,7 @@ namespace protocol
 
 		union {
 			Protocol protocol;
+			DriverStatus status;
 		};
 
 		Response() : type(ResponseInvalid) { }

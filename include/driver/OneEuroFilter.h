@@ -28,6 +28,7 @@ namespace oneeuro {
 		vr::HmdVector3d_t deriv = { 0, 0, 0 };
 
 		void reset() { initialized = false; }
+		void snap(const vr::HmdVector3d_t& x) { value = x; deriv = { 0, 0, 0 }; initialized = true; }
 
 		// confidence 0..1: 1 = normal One Euro, 0 = ignore this sample.
 		vr::HmdVector3d_t filter(const vr::HmdVector3d_t& x, double dt, double confidence = 1.0) {
@@ -63,6 +64,7 @@ namespace oneeuro {
 		double speed = 0.0;
 
 		void reset() { initialized = false; }
+		void snap(const vr::HmdQuaternion_t& x) { value = normalize(x); speed = 0.0; initialized = true; }
 
 		// confidence 0..1, same as Vec3::filter.
 		vr::HmdQuaternion_t filter(vr::HmdQuaternion_t x, double dt, double confidence = 1.0) {

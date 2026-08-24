@@ -34,6 +34,11 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 		response.type = protocol::ResponseSuccess;
 		break;
 
+	case protocol::RequestGetStatus:
+		driver->GetStatus(response.status);
+		response.type = protocol::ResponseStatus;
+		break;
+
 	default:
 		LOG("Invalid IPC request: %d", request.type);
 		break;
