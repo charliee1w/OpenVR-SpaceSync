@@ -74,11 +74,12 @@ private:
 	// while the head turns: yaw residual r ~= omega * (tau - tau_true), so nudge tau by -r/omega.
 	struct LatencyEstimate
 	{
-		double tau = 0.0;           // seconds, on top of the reported time offsets
+		double tauRot = 0.0;
+		double tauPos = 0.0;
 		bool primed = false;
 		LARGE_INTEGER lastUpdate = {};
 
-		void reset() { tau = 0.0; primed = false; }
+		void reset() { tauRot = 0.0; tauPos = 0.0; primed = false; }
 	} latency;
 	void ApplyDrift(vr::DriverPose_t &pose) const;
 	void ApplyInverseDrift(vr::DriverPose_t &pose) const;

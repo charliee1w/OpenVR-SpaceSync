@@ -346,7 +346,7 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 	LARGE_INTEGER now, freq;
 	QueryPerformanceCounter(&now);
 	QueryPerformanceFrequency(&freq);
-	double tauMs = latency.tau * 1000.0;
+	double tauMs = latency.tauRot * 1000.0;
 	if (!driftLog.primed)
 	{
 		driftLog.primed = true;
@@ -354,8 +354,8 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 		driftLog.translation = drift.translation;
 		driftLog.tauMs = tauMs;
 		driftLog.lastLog = now;
-		LOG("Drift (SLAM->tracker) initialised: yaw %.2f deg, translation (%.3f, %.3f, %.3f) m, latency offset %.1f ms",
-			yawDeg, drift.translation.v[0], drift.translation.v[1], drift.translation.v[2], tauMs);
+		LOG("Drift (SLAM->tracker) initialised: yaw %.2f deg, translation (%.3f, %.3f, %.3f) m, latency offset rot %.1f ms / pos %.1f ms",
+			yawDeg, drift.translation.v[0], drift.translation.v[1], drift.translation.v[2], tauMs, latency.tauPos * 1000.0);
 	}
 	else
 	{
@@ -366,11 +366,11 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 
 		if ((std::fabs(dYaw) > 1.0 || dTrans > 0.05 || std::fabs(dTau) > 5.0) && sinceLog > 1.0)
 		{
-			LOG("Drift (SLAM->tracker) changed: yaw %.2f -> %.2f deg (delta %.2f), translation (%.3f, %.3f, %.3f) -> (%.3f, %.3f, %.3f) m (delta %.1f cm), latency offset %.1f -> %.1f ms",
+			LOG("Drift (SLAM->tracker) changed: yaw %.2f -> %.2f deg (delta %.2f), translation (%.3f, %.3f, %.3f) -> (%.3f, %.3f, %.3f) m (delta %.1f cm), latency offset rot %.1f -> %.1f ms, pos %.1f ms",
 				driftLog.yawDeg, yawDeg, dYaw,
 				driftLog.translation.v[0], driftLog.translation.v[1], driftLog.translation.v[2],
 				drift.translation.v[0], drift.translation.v[1], drift.translation.v[2], dTrans * 100.0,
-				driftLog.tauMs, tauMs);
+				driftLog.tauMs, tauMs, latency.tauPos * 1000.0);
 			driftLog.yawDeg = yawDeg;
 			driftLog.translation = drift.translation;
 			driftLog.tauMs = tauMs;
@@ -385,7 +385,8 @@ void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
 	status.mountShiftSuspected = mount.suspected;
 	status.tiltDeg = mount.tiltDeg;
 	status.translationDeviationM = mount.translationDeviation;
-	status.latencyMs = latency.tau * 1000.0;
+	status.latencyMs = latency.tauRot * 1000.0;
+	status.latencyPosMs = latency.tauPos * 1000.0;
 	status.jumpsCompensated = jump.compensated;
 }
 
@@ -624,15 +625,16 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				{
 					// Predict the tracker sample to the headset pose's time (reported offsets + learned tau),
 					// otherwise head motion leaks into the drift as speed x time gap.
-					double dtAlign = (pose.poseTimeOffset) - (ts.poseTimeOffset - age) + latency.tau;
-					if (dtAlign > 0.30) dtAlign = 0.30;
-					if (dtAlign < -0.10) dtAlign = -0.10;
+					double dtBase = (pose.poseTimeOffset) - (ts.poseTimeOffset - age);
+					auto clampAlign = [](double v) { return v > 0.30 ? 0.30 : (v < -0.10 ? -0.10 : v); };
+					double dtAlignRot = clampAlign(dtBase + latency.tauRot);
+					double dtAlignPos = clampAlign(dtBase + latency.tauPos);
 
-					vr::HmdQuaternion_t sampleRotation = quaternionNormalize(quaternionFromAngularVelocity(ts.angularVelocity, dtAlign) * ts.rotation);
+					vr::HmdQuaternion_t sampleRotation = quaternionNormalize(quaternionFromAngularVelocity(ts.angularVelocity, dtAlignRot) * ts.rotation);
 					double samplePosition[3] = {
-						ts.position[0] + ts.velocity[0] * dtAlign,
-						ts.position[1] + ts.velocity[1] * dtAlign,
-						ts.position[2] + ts.velocity[2] * dtAlign
+						ts.position[0] + ts.velocity[0] * dtAlignPos,
+						ts.position[1] + ts.velocity[1] * dtAlignPos,
+						ts.position[2] + ts.velocity[2] * dtAlignPos
 					};
 
 					vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * sampleRotation);
@@ -674,9 +676,33 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 							double step = -(r / omegaYaw);            // how far off tau still is
 							if (step > 0.1) step = 0.1;
 							if (step < -0.1) step = -0.1;
-							latency.tau += step * (dtLat / 3.0);      // settles after ~3 s of head motion
-							if (latency.tau > 0.25) latency.tau = 0.25;
-							if (latency.tau < -0.05) latency.tau = -0.05;
+							latency.tauRot += step * (dtLat / 3.0);      // settles after ~3 s of head motion
+							if (latency.tauRot > 0.25) latency.tauRot = 0.25;
+							if (latency.tauRot < -0.05) latency.tauRot = -0.05;
+						}
+					}
+
+					vr::HmdVector3d_t headVel = quaternionRotateVector(hmdTracker.calibrationRotation, ts.velocity);
+					double speed = std::sqrt(headVel.v[0] * headVel.v[0] + headVel.v[1] * headVel.v[1] + headVel.v[2] * headVel.v[2]);
+					if (drift.valid && jump.pending == 0 && speed > 0.3)
+					{
+						double slamScale = SlamToCorrectedScale();
+						vr::HmdVector3d_t rotatedRaw = quaternionRotateVector(drift.rotation, rawPosition);
+						double residual[3] = {
+							headPosition[0] - rotatedRaw.v[0] * slamScale - drift.translation.v[0],
+							headPosition[1] - rotatedRaw.v[1] * slamScale - drift.translation.v[1],
+							headPosition[2] - rotatedRaw.v[2] * slamScale - drift.translation.v[2]
+						};
+						double residualNorm = std::sqrt(residual[0] * residual[0] + residual[1] * residual[1] + residual[2] * residual[2]);
+						if (residualNorm < 0.3)
+						{
+							double along = (residual[0] * headVel.v[0] + residual[1] * headVel.v[1] + residual[2] * headVel.v[2]) / (speed * speed);
+							double step = -along;
+							if (step > 0.1) step = 0.1;
+							if (step < -0.1) step = -0.1;
+							latency.tauPos += step * (dtLat / 3.0);
+							if (latency.tauPos > 0.30) latency.tauPos = 0.30;
+							if (latency.tauPos < -0.05) latency.tauPos = -0.05;
 						}
 					}
 

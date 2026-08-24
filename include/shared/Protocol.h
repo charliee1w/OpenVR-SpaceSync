@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 9;
+	const uint32_t Version = 10;
 
 	enum RequestType
 	{
@@ -116,6 +116,7 @@ namespace protocol
 		double tiltDeg;
 		double translationDeviationM;
 		double latencyMs;
+		double latencyPosMs;
 		uint32_t jumpsCompensated;
 	};
 
