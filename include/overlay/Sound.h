@@ -9,4 +9,5 @@ namespace sound
 	void Shutdown();
 	void Play(const char* name);
 	void ClearQueue();
+	void Stop();
 }

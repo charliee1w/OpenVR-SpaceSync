@@ -792,27 +792,36 @@ static void UpdateCalibrationSounds(CalibrationContext &ctx)
 	static const char *directions[] = { "look_left", "look_center", "look_right", "look_center", "look_up", "look_center", "look_down", "look_center" };
 	static CalibrationState lastState = CalibrationState::None;
 	static int lastStep = -1;
+	static size_t stepStart = 0;
+	static bool nextPlayed = false;
 
 	if (ctx.state == CalibrationState::Sampling)
 	{
 		size_t target = ctx.SampleCount();
+		size_t perStep = target > 0 ? target / 8 : 1;
 		int step = target > 0 ? (int)(collectedSamples.size() * 8 / target) : 0;
 		if (step > 7) step = 7;
 		if (step != lastStep)
 		{
-			sound::ClearQueue();
-			if (lastStep >= 0)
-				sound::Play("next");
+			sound::Stop();
 			sound::Play(directions[step]);
 			lastStep = step;
+			stepStart = collectedSamples.size();
+			nextPlayed = false;
+		}
+		else if (!nextPlayed && collectedSamples.size() + 8 >= stepStart + perStep)
+		{
+			sound::Play("next");
+			nextPlayed = true;
 		}
 	}
 	else
 	{
-		if (lastState == CalibrationState::Sampling && ctx.lastCalibrationOk)
+		if (lastState == CalibrationState::Sampling)
 		{
-			sound::ClearQueue();
-			sound::Play("next");
+			sound::Stop();
+			if (ctx.lastCalibrationOk)
+				sound::Play("next");
 		}
 		lastStep = -1;
 	}

@@ -9,6 +9,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -23,6 +24,8 @@ namespace sound
 	namespace
 	{
 		const double kVolume = 0.5;
+		const double kTailSeconds = 0.1;
+		const double kSilence = 0.02;
 
 		std::mutex mutex;
 		std::condition_variable wake;
@@ -44,12 +47,15 @@ namespace sound
 		uint32_t ReadU32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24); }
 		uint16_t ReadU16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
-		void ScalePcm16(std::vector<uint8_t>& wav)
+		void WriteU32(uint8_t* p, uint32_t v) { p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; p[2] = (v >> 16) & 0xff; p[3] = (v >> 24) & 0xff; }
+
+		void PrepareWav(std::vector<uint8_t>& wav)
 		{
 			if (wav.size() < 12 || std::memcmp(wav.data(), "RIFF", 4) != 0 || std::memcmp(wav.data() + 8, "WAVE", 4) != 0)
 				return;
 			size_t pos = 12;
-			uint16_t format = 0, bits = 0;
+			uint16_t format = 0, bits = 0, channels = 1;
+			uint32_t rate = 44100;
 			while (pos + 8 <= wav.size())
 			{
 				uint32_t size = ReadU32(wav.data() + pos + 4);
@@ -59,15 +65,33 @@ namespace sound
 				if (std::memcmp(wav.data() + pos, "fmt ", 4) == 0 && size >= 16)
 				{
 					format = ReadU16(body);
+					channels = ReadU16(body + 2);
+					rate = ReadU32(body + 4);
 					bits = ReadU16(body + 14);
 				}
 				else if (std::memcmp(wav.data() + pos, "data", 4) == 0)
 				{
-					if (format == 1 && bits == 16)
+					if (format == 1 && bits == 16 && channels > 0)
 					{
 						int16_t* samples = reinterpret_cast<int16_t*>(wav.data() + pos + 8);
 						size_t count = size / 2;
+						int peak = 0;
 						for (size_t i = 0; i < count; i++)
+							if (std::abs((int)samples[i]) > peak) peak = std::abs((int)samples[i]);
+						size_t last = 0;
+						int threshold = (int)(peak * kSilence);
+						for (size_t i = 0; i < count; i++)
+							if (std::abs((int)samples[i]) > threshold) last = i;
+						size_t keep = last + 1 + (size_t)(kTailSeconds * rate) * channels;
+						keep -= keep % channels;
+						if (keep < count)
+						{
+							size = (uint32_t)(keep * 2);
+							WriteU32(wav.data() + pos + 4, size);
+							wav.resize(pos + 8 + size + (size & 1));
+							WriteU32(wav.data() + 4, (uint32_t)(wav.size() - 8));
+						}
+						for (size_t i = 0; i < keep && i < count; i++)
 							samples[i] = (int16_t)(samples[i] * kVolume);
 					}
 					return;
@@ -87,7 +111,7 @@ namespace sound
 			if (file)
 			{
 				buffer.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-				ScalePcm16(buffer);
+				PrepareWav(buffer);
 			}
 			return buffer.empty() ? nullptr : &buffer;
 		}
@@ -152,5 +176,11 @@ namespace sound
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		queue.clear();
+	}
+
+	void Stop()
+	{
+		ClearQueue();
+		PlaySoundA(nullptr, nullptr, 0);
 	}
 }
