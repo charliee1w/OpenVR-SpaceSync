@@ -7,8 +7,8 @@
 ;--------------------------------
 ; General Configuration
 
-!define APP_VERSION "2.5.0"
-!define APP_VERSION_META "2.5.0.0"
+!define APP_VERSION "2.6.0"
+!define APP_VERSION_META "2.6.0.0"
 !define APP_NAME "SpaceSync"
 !define LEGACY_APP_NAME "OpenVR-SpaceOverride"
 

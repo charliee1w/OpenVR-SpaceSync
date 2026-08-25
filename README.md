@@ -79,13 +79,13 @@ If the result feels off, choose a slower calibration speed in Settings and run i
 
 ## Troubleshooting
 
-**View rotated / black borders / hands not in front of me after a tracking hiccup.** Turn on Follow SLAM HMD. If you want to see what happened, look at `spacesync_driver.log` next to `vrserver.exe`, usually in `C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\`. Lines starting with `Head tracker:` show tracker state changes, `Drift (SLAM->tracker) changed` shows the relation between the two spaces jumping, and `latency offset` is the learned time offset.
+**View rotated / black borders / hands not in front of me after a tracking hiccup.** Turn on Follow SLAM HMD. If you want to see what happened, look at `spacesync_driver.log` in the SteamVR folder, usually `C:\Program Files (x86)\Steam\steamapps\common\SteamVR\`. Lines starting with `Head tracker:` show tracker state changes, `Drift (SLAM->tracker) changed` shows the relation between the two spaces jumping, and `latency offset` is the learned time offset.
 
-**Trackers sway when I turn my head fast (follow mode).** Hold still for a second and it should settle. If it keeps happening, turn the `minCutoff` of Relative Calibration down a bit.
+**Trackers sway when I turn my head fast (follow mode).** Hold still for a second and it should settle. The alignment is averaged over a few seconds of calm head movement, so a moment of standing still is all it needs.
 
-**Controllers jump, then settle back.** This is expected when the headset relocalises. That is the alignment catching up. Since 2026-08-24 the driver detects such jumps and applies them in one go instead of filtering, so this should be rare now (`Drift jump compensated` in the log).
+**Controllers jump, then settle back.** This is expected when the headset relocalises. That is the alignment catching up. The driver runs a change detector on the alignment and applies a real jump in one go instead of sliding it in (`Drift jump compensated` in the log).
 
-**The app says the head tracker seems to have moved.** The driver keeps an eye on how well the calibrated mount offset still fits. If the tracker got bumped or the strap shifted, the leftover tilt or offset grows and you get that yellow line under the circle. Recalibrate and it goes away.
+**The app says the head tracker seems to have moved.** The driver keeps refining the mount offset while you play and corrects small shifts on its own (the refined values are saved back into your profile). If that correction grows past a few degrees or centimetres, you get the yellow line under the circle. A fresh calibration is the clean fix.
 
 **SpaceSync says the driver is unavailable.** SteamVR has to be running and the SpaceSync add on has to be enabled under SteamVR Settings > Startup / Shutdown > Manage Add ons. Overlay and driver must come from the same build. The installer takes care of that.
 

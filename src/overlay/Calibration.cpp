@@ -686,7 +686,31 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		protocol::Request statusReq(protocol::RequestGetStatus);
 		protocol::Response statusResp = Driver.SendBlocking(statusReq);
 		if (statusResp.type == protocol::ResponseStatus)
+		{
 			ctx.driverStatus = statusResp.status;
+			const auto &st = ctx.driverStatus;
+			if (st.refinementValid && ctx.enabled && ctx.validProfile && st.calmSeconds >= 60.0)
+			{
+				auto differs = [](double a, double b) { return std::fabs(a - b) > 1e-12; };
+				bool changed = differs(st.offsetRotation.w, ctx.relativeRotation.w) || differs(st.offsetRotation.x, ctx.relativeRotation.x)
+					|| differs(st.offsetRotation.y, ctx.relativeRotation.y) || differs(st.offsetRotation.z, ctx.relativeRotation.z)
+					|| differs(st.offsetTranslation.v[0], ctx.relativeTranslation.v[0]) || differs(st.offsetTranslation.v[1], ctx.relativeTranslation.v[1])
+					|| differs(st.offsetTranslation.v[2], ctx.relativeTranslation.v[2]) || differs(st.hmdScale, ctx.hmdScale);
+				if (changed)
+				{
+					ctx.relativeRotation = st.offsetRotation;
+					ctx.relativeTranslation = st.offsetTranslation;
+					ctx.hmdScale = st.hmdScale;
+					ctx.refinementDirty = true;
+				}
+				if (ctx.refinementDirty && ctx.timeLastTick - ctx.timeRefinementSaved > 30.0)
+				{
+					SaveProfile(ctx);
+					ctx.refinementDirty = false;
+					ctx.timeRefinementSaved = ctx.timeLastTick;
+				}
+			}
+		}
 	}
 	catch (const std::runtime_error &e)
 	{

@@ -5,11 +5,13 @@
 
 #include "IPCServer.h"
 #include "OneEuroFilter.h"
+#include "AlignmentEstimator.h"
 #include "KalmanFilter.h"
 
 #include <openvr_driver.h>
 
 #include <atomic>
+#include <cmath>
 #include <mutex>
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
@@ -70,17 +72,72 @@ private:
 		return 1.0 / (1.0 + l * l + a * a);
 	}
 
-	// Leftover time offset between headset pose and tracker pose (streamers pre-predict), learned
-	// while the head turns: yaw residual r ~= omega * (tau - tau_true), so nudge tau by -r/omega.
-	struct LatencyEstimate
-	{
-		double tauRot = 0.0;
-		double tauPos = 0.0;
-		bool primed = false;
-		LARGE_INTEGER lastUpdate = {};
+	align::ClockAligner clock;
+	double clockLogTime = 0.0;
+	double lastHmdTime = -1.0;
+	double tauRotTrim = 0.0;
+	double refineTauRot = 0.0;
+	double refineTauPos = 0.0;
 
-		void reset() { tauRot = 0.0; tauPos = 0.0; primed = false; }
-	} latency;
+	struct FrameConvention
+	{
+		bool primed = false;
+		double time = 0.0;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t position = { 0, 0, 0 };
+		double angWorld = 0.0, angDevice = 0.0, angNorm = 0.0;
+		double velWorld = 0.0, velDevice = 0.0, velNorm = 0.0;
+		bool angularDevice = false;
+		bool velocityDevice = false;
+		bool decidedAngular = false;
+		bool decidedVelocity = false;
+
+		void reset()
+		{
+			primed = false;
+			angWorld = angDevice = angNorm = 0.0;
+			velWorld = velDevice = velNorm = 0.0;
+			angularDevice = velocityDevice = false;
+			decidedAngular = decidedVelocity = false;
+		}
+	} frames;
+
+	struct ResidualDiag
+	{
+		double yawNum = 0.0, yawDen = 0.0, posNum = 0.0, posDen = 0.0;
+		int yawFrames = 0, posFrames = 0;
+		double lastLog = 0.0;
+
+		void reset() { yawNum = yawDen = posNum = posDen = 0.0; yawFrames = posFrames = 0; }
+	} residualDiag;
+
+	align::MountRefiner refine;
+	LARGE_INTEGER refineLast = {};
+	bool refinePrimed = false;
+	double refineLogTime = 0.0;
+
+	struct EffectiveOffsets
+	{
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t translation = { 0, 0, 0 };
+		double hmdScale = 1.0;
+	};
+	EffectiveOffsets effective;
+	std::mutex effectiveMutex;
+	EffectiveOffsets effectiveShared;
+	bool effectiveSharedValid = false;
+	EffectiveOffsets published;
+	bool publishedValid = false;
+	void UpdateEffectiveOffsets();
+
+	static bool OffsetsEqual(const vr::HmdQuaternion_t& qa, const vr::HmdVector3d_t& ta, double sa,
+		const vr::HmdQuaternion_t& qb, const vr::HmdVector3d_t& tb, double sb)
+	{
+		const double eps = 1e-12;
+		return std::fabs(qa.w - qb.w) < eps && std::fabs(qa.x - qb.x) < eps && std::fabs(qa.y - qb.y) < eps && std::fabs(qa.z - qb.z) < eps
+			&& std::fabs(ta.v[0] - tb.v[0]) < eps && std::fabs(ta.v[1] - tb.v[1]) < eps && std::fabs(ta.v[2] - tb.v[2]) < eps
+			&& std::fabs(sa - sb) < eps;
+	}
 	void ApplyDrift(vr::DriverPose_t &pose) const;
 	void ApplyInverseDrift(vr::DriverPose_t &pose) const;
 	void NoteTrackerState(bool trackerOK, bool usingSlam, const vr::TrackedDevicePose_t &tp,
@@ -109,11 +166,13 @@ private:
 	void StoreTrackerSample(const vr::DriverPose_t &pose);
 	TrackerSample LoadTrackerSample();
 
-	double SlamToCorrectedScale() const
+	double SlamToCorrectedScaleBase() const
 	{
 		double k = hmdTracker.hmdScale > 0.0 ? 1.0 / hmdTracker.hmdScale : 1.0;
 		return hmdTracker.native ? k : k * hmdTracker.calibrationScale;
 	}
+
+	double SlamToCorrectedScale() const { return SlamToCorrectedScaleBase() * (1.0 + refine.scale); }
 
 	IPCServer server;
 
@@ -156,8 +215,7 @@ private:
 		vr::HmdVector3d_t translation = { 0, 0, 0 };
 
 		LARGE_INTEGER lastUpdate = {};
-		oneeuro::Quat rotationFilter;
-		oneeuro::Vec3 translationFilter;
+		align::YawTranslationEstimator estimator;
 	} drift;
 
 	struct HeadFilter
@@ -202,25 +260,13 @@ private:
 		void reset() { primed = false; wasOK = false; wasFallback = false; lastResult = vr::TrackingResult_Uninitialized; relativeYawAtLossValid = false; }
 	} trackerState;
 
-	struct JumpDetector
-	{
-		int pending = 0;
-		vr::HmdQuaternion_t firstRotation = { 1, 0, 0, 0 };
-		vr::HmdVector3d_t firstTranslation = { 0, 0, 0 };
-		uint32_t compensated = 0;
-
-		void reset() { pending = 0; }
-	} jump;
-
 	struct MountCheck
 	{
-		bool primed = false;
 		double tiltDeg = 0.0;
 		double translationDeviation = 0.0;
-		vr::HmdVector3d_t meanTranslation = { 0, 0, 0 };
 		bool suspected = false;
 
-		void reset() { primed = false; tiltDeg = 0.0; translationDeviation = 0.0; suspected = false; }
+		void reset() { tiltDeg = 0.0; translationDeviation = 0.0; suspected = false; }
 	} mount;
 
 	// Last logged drift, so a jump of the SLAM<->lighthouse relation shows up in the log.

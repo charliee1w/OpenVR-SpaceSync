@@ -425,7 +425,7 @@ void UserInterface::RenderCalibration(const Status& status)
 	{
 		VSpace(18.0f);
 		char warn[192];
-		std::snprintf(warn, sizeof warn, "The head tracker seems to have moved on the headset (tilt %.1f deg, offset %.1f cm). Please recalibrate.",
+		std::snprintf(warn, sizeof warn, "The head tracker seems to have moved on the headset. The driver corrected %.1f deg / %.1f cm so far, a fresh calibration is the clean fix.",
 			CalCtx.driverStatus.tiltDeg, CalCtx.driverStatus.translationDeviationM * 100.0);
 		ImVec2 ws = TextSize(F.regular, 13.0f, warn);
 		ImGui::SetCursorScreenPos(ImVec2(c.x - ws.x * 0.5f, ImGui::GetCursorScreenPos().y));
@@ -605,13 +605,11 @@ void UserInterface::RenderSmoothing()
 	ParamSliders(CalCtx.headFilterParams, changed, maxW);
 
 	VSpace(16.0f);
-	SectionHeader("Relative Calibration", maxW);
+	SectionHeader("Space Alignment", maxW);
 	TextWrapped(F.regular, 12.5f, P.textDim, maxW,
-		"Keeps your controllers and other tracked devices lined up with your real space, and "
-		"steadies your view if the headset briefly loses tracking. Add more smoothing if they "
-		"look shaky; ease off if they are slow to line up.");
-	VSpace(10.0f);
-	ParamSliders(CalCtx.driftFilterParams, changed, maxW);
+		"The alignment between headset space and lighthouse space is averaged over a few seconds "
+		"of calm head movement and only ever changes in one step when the headset really re-localises. "
+		"There is nothing to tune here anymore.");
 
 	if (changed)
 		SendOneEuroParams();

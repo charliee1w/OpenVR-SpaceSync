@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 10;
+	const uint32_t Version = 11;
 
 	enum RequestType
 	{
@@ -118,6 +118,14 @@ namespace protocol
 		double latencyMs;
 		double latencyPosMs;
 		uint32_t jumpsCompensated;
+		double sigmaYawDeg;
+		double sigmaTranslationM;
+		double calmSeconds;
+		uint32_t refinementSolves;
+		bool refinementValid;
+		vr::HmdQuaternion_t offsetRotation;
+		vr::HmdVector3d_t offsetTranslation;
+		double hmdScale;
 	};
 
 	struct Request
