@@ -103,6 +103,8 @@ copy /Y "%ROOT%\NOTICE.md"                    "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\LICENSES"            "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\manifest.vrmanifest" "%ROOT%\bin\" >nul || goto :fail
 copy /Y "%ROOT%\resources\icon.png"            "%ROOT%\bin\" >nul || goto :fail
+if not exist "%ROOT%\bin\sound" mkdir "%ROOT%\bin\sound"
+copy /Y "%ROOT%\src\sound\*.wav"               "%ROOT%\bin\sound\" >nul || goto :fail
 if not exist "%ROOT%\bin\openvr_api.dll" (
     REM fall back to the OpenVR submodule's redistributable if bin\ does not have it
     copy /Y "%ROOT%\3rdparty\OpenVR\bin\win64\openvr_api.dll" "%ROOT%\bin\" >nul || goto :fail

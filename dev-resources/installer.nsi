@@ -124,6 +124,8 @@ Section "Install" SecInstall
     File "${FILES_DIR}\SpaceSync.exe"
     File "${FILES_DIR}\openvr_api.dll"
     File "${FILES_DIR}\icon.png"
+    SetOutPath "$INSTDIR\sound"
+    File "${FILES_DIR}\sound\*.wav"
 
     SetOutPath "$INSTDIR\driver"
     File /r "${DRIVER_DIR}\*"
@@ -166,6 +168,8 @@ Section "Uninstall"
     Delete "$INSTDIR\SpaceSync.exe"
     Delete "$INSTDIR\openvr_api.dll"
     Delete "$INSTDIR\icon.png"
+    Delete "$INSTDIR\sound\*.wav"
+    RMDir "$INSTDIR\sound"
     RMDir /r "$INSTDIR\driver"
 
     DeleteRegKey HKLM "Software\${APP_NAME}"

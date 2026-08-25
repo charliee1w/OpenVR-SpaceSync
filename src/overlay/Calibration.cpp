@@ -6,6 +6,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "IPCClient.h"
+#include "Sound.h"
 
 #include <string>
 #include <vector>
@@ -786,6 +787,38 @@ void CancelCalibration()
 	AbortAndRestoreProfile(ctx);
 }
 
+static void UpdateCalibrationSounds(CalibrationContext &ctx)
+{
+	static const char *directions[] = { "look_left", "look_center", "look_right", "look_center", "look_up", "look_center", "look_down", "look_center" };
+	static CalibrationState lastState = CalibrationState::None;
+	static int lastStep = -1;
+
+	if (ctx.state == CalibrationState::Sampling)
+	{
+		size_t target = ctx.SampleCount();
+		int step = target > 0 ? (int)(collectedSamples.size() * 8 / target) : 0;
+		if (step > 7) step = 7;
+		if (step != lastStep)
+		{
+			sound::ClearQueue();
+			if (lastStep >= 0)
+				sound::Play("next");
+			sound::Play(directions[step]);
+			lastStep = step;
+		}
+	}
+	else
+	{
+		if (lastState == CalibrationState::Sampling && ctx.lastCalibrationOk)
+		{
+			sound::ClearQueue();
+			sound::Play("next");
+		}
+		lastStep = -1;
+	}
+	lastState = ctx.state;
+}
+
 void CalibrationTick(double time)
 {
 	if (!vr::VRSystem())
@@ -797,6 +830,7 @@ void CalibrationTick(double time)
 
 	ctx.timeLastTick = time;
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, ctx.devicePoses, vr::k_unMaxTrackedDeviceCount);
+	UpdateCalibrationSounds(ctx);
 
 	if (ctx.state == CalibrationState::None)
 	{
