@@ -257,9 +257,9 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 	return euler;
 }
 
-static const double ScaleSpreadThreshold = 0.1;
-static const double MinCalibratedScale = 0.9;
-static const double MaxCalibratedScale = 1.1;
+static const double ScaleSpreadThreshold = 0.5;
+static const double MinCalibratedScale = 0.97;
+static const double MaxCalibratedScale = 1.03;
 
 Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
 {
@@ -327,7 +327,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
-		snprintf(buf, sizeof buf, "Not enough positional movement to estimate headset scale (spread %.2f m), assuming 1\n", spread);
+		snprintf(buf, sizeof buf, "Headset scale not estimated (movement spread %.2f m, needs %.1f m of walking), assuming 1. The driver refines it while you play.\n", spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
 		return 1.0;
 	}
@@ -351,13 +351,13 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 
 	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
-		snprintf(buf, sizeof buf, "Fitted space scale %.5f is not plausible, assuming headset scale 1\n", fittedScale);
+		snprintf(buf, sizeof buf, "Fitted headset scale %.5f is outside %.2f..%.2f, assuming 1\n", fittedScale, MinCalibratedScale, MaxCalibratedScale);
 		CalCtx.Log(buf);
 		return 1.0;
 	}
 
-	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%), implied absolute headset scale: %.5f\n",
-		fittedScale, (fittedScale - 1.0) * 100.0, fittedScale / targetModelScale);
+	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%) from %.2f m of movement, implied absolute headset scale: %.5f\n",
+		fittedScale, (fittedScale - 1.0) * 100.0, spread, fittedScale / targetModelScale);
 	CalCtx.Log(buf);
 	return fittedScale;
 }
