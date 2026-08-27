@@ -91,6 +91,7 @@ public:
     [[nodiscard]] auto PipelineCache() const -> VkPipelineCache { return vulkan_pipeline_cache_; }
     [[nodiscard]] auto MinimumConcurrentImageCount() const -> uint32_t { return minimum_concurrent_image_count_; }
     [[nodiscard]] auto ShouldRebuildSwapchain() const -> bool { return should_rebuild_swapchain_; }
+    auto RequestSwapchainRebuild() -> void { should_rebuild_swapchain_ = true; }
 
     auto SetupWindow(Vulkan_Window* window, VkSurfaceKHR surface, uint32_t width, uint32_t height) -> void;
     auto SetupRenderTarget(uint32_t width, uint32_t height, VkSurfaceFormatKHR format) -> void;

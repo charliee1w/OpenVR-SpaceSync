@@ -30,6 +30,7 @@ public:
     auto Show() -> void;
     auto SetMinimizedFromEvent(bool state) -> void;
     auto Draw(bool dashboardVisible) -> void;
+    auto Resize(VulkanRenderer*& renderer, int width, int height) -> void;
 
     auto Destroy(VulkanRenderer*& renderer) -> void;
 
@@ -41,6 +42,7 @@ private:
     int width_;
     int height_;
     float ui_scale_ = 1.0f;
+    VkSurfaceFormatKHR render_format_ = {};
     bool window_shown_;
     bool window_minimized_;
     UserInterface m_userInterface_;

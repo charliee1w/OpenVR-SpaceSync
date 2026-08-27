@@ -36,7 +36,7 @@ ImGuiWindow::ImGuiWindow()
 auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, const char* name, int width, int height) -> void
 {
     // width/height are design px, scaled by the display's DPI scale.
-    auto sdl_window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_MOUSE_FOCUS | SDL_WINDOW_BORDERLESS;
+    auto sdl_window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_MOUSE_FOCUS | SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE;
     window_ = SDL_CreateWindow(name, width, height, sdl_window_flags);
     if (window_ == nullptr) {
 #ifdef _WIN32
@@ -138,9 +138,25 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
 
     ImGui_ImplOpenVR_Init(&openvr_init_info);
 
-    renderer->SetupRenderTarget(width_, height_, render_format);
+    render_format_ = render_format;
+    renderer->SetupRenderTarget(width_, height_, render_format_);
+
+    SDL_SetWindowMinimumSize(window_, 800, 560);
 
     m_userInterface_ = {};
+}
+
+auto ImGuiWindow::Resize(VulkanRenderer*& renderer, int width, int height) -> void
+{
+    if (width < 1 || height < 1 || (width == width_ && height == height_))
+        return;
+
+    width_ = width;
+    height_ = height;
+
+    renderer->DestroyRenderTarget();
+    renderer->SetupRenderTarget(width_, height_, render_format_);
+    renderer->RequestSwapchainRebuild();
 }
 
 auto ImGuiWindow::Show() -> void
@@ -196,8 +212,24 @@ SDL_HitTestResult ImGuiWindow::HitTest(SDL_Window* window, const SDL_Point* area
     if (!self || !area)
         return SDL_HITTEST_NORMAL;
 
-    // Title bar drags the window, except over the buttons.
     const float s = ui::S();
+
+    const int edge = (int)(6.0f * s + 0.5f);
+    const bool left = area->x < edge;
+    const bool right = area->x >= self->width_ - edge;
+    const bool top = area->y < edge;
+    const bool bottom = area->y >= self->height_ - edge;
+
+    if (top && left)     return SDL_HITTEST_RESIZE_TOPLEFT;
+    if (top && right)    return SDL_HITTEST_RESIZE_TOPRIGHT;
+    if (bottom && left)  return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+    if (bottom && right) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+    if (left)            return SDL_HITTEST_RESIZE_LEFT;
+    if (right)           return SDL_HITTEST_RESIZE_RIGHT;
+    if (top)             return SDL_HITTEST_RESIZE_TOP;
+    if (bottom)          return SDL_HITTEST_RESIZE_BOTTOM;
+
+    // Title bar drags the window, except over the buttons.
     const float titleH = UserInterface::TitleBarHeight * s;
     const float buttonsW = UserInterface::TitleBarButtonWidth * UserInterface::TitleBarButtonCount * s + 4.0f * s;
     if (area->y >= 0 && area->y < titleH && area->x < self->width_ - buttonsW)
