@@ -53,6 +53,7 @@ struct CalibrationContext
 	bool enableAngularVelocity = false;
 	bool continuousSync = false;
 	bool followSlamHmd = true;
+	bool noHeadTracker = false;
 	bool hideHeadTracker = true;
 	float predictionTime = 1.0f;
 	float uiScale = 1.25f;            // UI content scale

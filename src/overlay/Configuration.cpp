@@ -95,6 +95,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.followSlamHmd = false;
 
+	if (obj["noHeadTracker"].is<bool>())
+		ctx.noHeadTracker = obj["noHeadTracker"].get<bool>();
+	else
+		ctx.noHeadTracker = false;
+
 	if (obj["hideHeadTracker"].is<bool>())
 		ctx.hideHeadTracker = obj["hideHeadTracker"].get<bool>();
 	else
@@ -198,6 +203,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);
 	profile["continuousSync"].set<bool>(ctx.continuousSync);
 	profile["followSlam"].set<bool>(ctx.followSlamHmd);
+	profile["noHeadTracker"].set<bool>(ctx.noHeadTracker);
 	profile["hideHeadTracker"].set<bool>(ctx.hideHeadTracker);
 	double uiScale = ctx.uiScale;
 	profile["uiScale"].set<double>(uiScale);

@@ -151,11 +151,18 @@ UserInterface::Status UserInterface::BuildStatus(const VRState& state) const
 		s.detail = "Click the circle to calibrate";
 		s.color = P.textMuted;
 	}
-	else if (!s.tracker)
+	else if (!s.tracker && !CalCtx.noHeadTracker)
 	{
 		s.headline = "Headset tracker not connected";
 		s.detail = CalCtx.trackerSerial;
 		s.color = P.danger;
+	}
+	else if (CalCtx.noHeadTracker)
+	{
+		s.headline = "HMD Driven, one-time calibration";
+		s.detail = "no running alignment";
+		s.color = P.green;
+		s.ok = true;
 	}
 	else if (!CalCtx.enabled)
 	{
@@ -190,7 +197,6 @@ static float AvailDesignWidth()
 
 static const float PageWidth = 900.0f;
 
-// Left inset that keeps the page centred once the window is wider than the layout needs.
 static float PageInset()
 {
 	return std::max(0.0f, (AvailDesignWidth() - PageWidth) * 0.5f);
@@ -249,12 +255,8 @@ UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24.0f), px(24.0f)));
 		if (ImGui::BeginChild("content", ImVec2(W, contentHeight_), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollWithMouse))
 		{
-			// ImGui jumps the wheel in whole steps. Keep our own target and ease toward it so the
-			// content glides instead of snapping.
 			const float current = ImGui::GetScrollY();
 
-			// Dragging the scrollbar, the keyboard or a content resize all move the scroll behind our
-			// back. Adopt that as the new target, otherwise the easing drags it back every frame.
 			if (scrollTab_ != (int)tab_ || std::abs(current - scrollApplied_) > 0.5f)
 			{
 				scrollTab_ = (int)tab_;
@@ -532,8 +534,6 @@ void UserInterface::RenderEdit(const Status& status)
 		VSpace(18.0f);
 	}
 
-	// In HMD Driven the runtime alignment re-nulls yaw and translation against the head, so edits to
-	// those cancel out again. Only what the alignment cannot absorb still bites.
 	struct Field { const char* label; double* value; double stepMul; bool worksInHmdDriven; };
 	Field rows[3][3] = {
 		{ { "Yaw", &CalCtx.calibratedRotation(1), 1.0, false }, { "Pitch", &CalCtx.calibratedRotation(2), 1.0, true }, { "Roll", &CalCtx.calibratedRotation(0), 1.0, true } },
@@ -667,7 +667,7 @@ void UserInterface::RenderSettings()
 
 	const float fullW = PageDesignWidth();
 	const float colW = (fullW - 40.0f) * 0.5f;
-	const float cardW = (fullW - 12.0f) * 0.5f;
+	const float cardW = (fullW - 2.0f * 12.0f) / 3.0f;
 
 	SectionHeader("Tracking Method", fullW);
 	VSpace(12.0f);
@@ -675,19 +675,27 @@ void UserInterface::RenderSettings()
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 
-		auto methodCard = [&](const char* label, const char* tag, bool recommended,
+		const float padX = 16.0f, padY = 15.0f, dotD = 15.0f, gap = 10.0f;
+
+		auto cardHeight = [&](float cardW, const char* label, const char* hint, const char* req) -> float
+		{
+			const float innerW = cardW - padX * 2.0f;
+			const float headH = std::max(TextSize(F.semibold, 13.5f, label).y, px(dotD));
+			return px(padY) + headH + px(9.0f)
+				+ TextSize(F.regular, 12.0f, hint, innerW).y + px(7.0f)
+				+ TextSize(F.regular, 12.0f, req, innerW).y + px(padY);
+		};
+
+		auto methodCard = [&](float cardW, float h, const char* label, const char* tag, unsigned tagColor,
 			const char* hint, const char* req, bool active) -> bool
 		{
-			const float padX = 16.0f, padY = 15.0f, dotD = 15.0f, gap = 10.0f;
 			const float innerW = cardW - padX * 2.0f;
 
 			ImVec2 labelSize = TextSize(F.semibold, 13.5f, label);
 			ImVec2 tagSize = TextSize(F.semibold, 11.0f, tag);
 			ImVec2 hintSize = TextSize(F.regular, 12.0f, hint, innerW);
-			ImVec2 reqSize = TextSize(F.regular, 12.0f, req, innerW);
 
 			const float headH = std::max(labelSize.y, px(dotD));
-			const float h = px(padY) + headH + px(9.0f) + hintSize.y + px(7.0f) + reqSize.y + px(padY);
 
 			ImVec2 p = ImGui::GetCursorScreenPos();
 			ImGui::PushID(label);
@@ -713,8 +721,8 @@ void UserInterface::RenderSettings()
 			float bx = tx + labelSize.x + px(gap);
 			ImVec2 b0(bx, cy - tagSize.y * 0.5f - px(2.0f));
 			ImVec2 b1(bx + tagSize.x + px(14.0f), cy + tagSize.y * 0.5f + px(2.0f));
-			dl->AddRectFilled(b0, b1, Col(recommended ? P.green : P.yellow, 0.12f), px(3.0f));
-			DrawText(dl, F.semibold, 11.0f, ImVec2(bx + px(7.0f), b0.y + px(2.0f)), recommended ? P.green : P.yellow, tag);
+			dl->AddRectFilled(b0, b1, Col(tagColor, 0.12f), px(3.0f));
+			DrawText(dl, F.semibold, 11.0f, ImVec2(bx + px(7.0f), b0.y + px(2.0f)), tagColor, tag);
 
 			float ty = p.y + px(padY) + headH + px(9.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + px(padX), ty));
@@ -727,24 +735,38 @@ void UserInterface::RenderSettings()
 		};
 
 		const float cardsX = ImGui::GetCursorPosX();
-		const float cardsY = ImGui::GetCursorPosY();
+		const float rowY = ImGui::GetCursorPosY();
 
-		bool pickHmd = methodCard("HMD Driven", "Recommended", true,
-			"The headset owns the tracking space and your lighthouse devices follow it. This keeps everything lined up even when the headset silently re-centres.",
-			"Requires a tracker on top of your head.", CalCtx.followSlamHmd);
-		float cardsBottom = ImGui::GetCursorPosY();
+		const char* hintHmd = "The headset owns the tracking space and your lighthouse devices follow it. A tracker on your head keeps them lined up continuously, even when the headset silently re-centres.";
+		const char* hintLighthouse = "The tracker on your head owns the tracking space and the headset follows it. Not recommended on Galaxy XR, Vive Pro or Pico 4, where it can cause jitter.";
+		const char* hintNoTracker = "The headset owns the tracking space and your lighthouse devices follow it, but there is no running alignment. You calibrate once by holding a controller or a tracker against your head, then put it back.";
+		const char* reqTracker = "Requires a tracker on top of your head.";
+		const char* reqNone = "No permanent tracker needed. Drifts over time.";
 
-		ImGui::SetCursorPos(ImVec2(cardsX + px(cardW + 12.0f), cardsY));
-		bool pickLighthouse = methodCard("Lighthouse Driven", "Not recommended", false,
-			"The tracker on your head owns the tracking space and the headset follows it. Not recommended on Galaxy XR, Vive Pro or Pico 4, where it can cause jitter.",
-			"Requires a tracker on top of your head.", !CalCtx.followSlamHmd);
-		cardsBottom = std::max(cardsBottom, ImGui::GetCursorPosY());
+		const float cardH = std::max(cardHeight(cardW, "HMD Driven", hintHmd, reqTracker),
+			std::max(cardHeight(cardW, "Lighthouse Driven", hintLighthouse, reqTracker),
+				cardHeight(cardW, "HMD Driven + No Tracker", hintNoTracker, reqNone)));
 
-		ImGui::SetCursorPos(ImVec2(cardsX, cardsBottom));
+		const bool isHmd = CalCtx.followSlamHmd && !CalCtx.noHeadTracker;
+		const bool isNoTracker = CalCtx.followSlamHmd && CalCtx.noHeadTracker;
 
-		if ((pickHmd && !CalCtx.followSlamHmd) || (pickLighthouse && CalCtx.followSlamHmd))
+		bool pickHmd = methodCard(cardW, cardH, "HMD Driven", "Highly Recommended", P.green,
+			hintHmd, reqTracker, isHmd);
+
+		ImGui::SetCursorPos(ImVec2(cardsX + px(cardW + 12.0f), rowY));
+		bool pickLighthouse = methodCard(cardW, cardH, "Lighthouse Driven", "Recommended", P.yellow,
+			hintLighthouse, reqTracker, !CalCtx.followSlamHmd);
+
+		ImGui::SetCursorPos(ImVec2(cardsX + 2.0f * px(cardW + 12.0f), rowY));
+		bool pickNoTracker = methodCard(cardW, cardH, "HMD Driven + No Tracker", "Not Recommended", P.danger,
+			hintNoTracker, reqNone, isNoTracker);
+
+		ImGui::SetCursorPos(ImVec2(cardsX, rowY + cardH));
+
+		if ((pickHmd && !isHmd) || (pickNoTracker && !isNoTracker) || (pickLighthouse && CalCtx.followSlamHmd))
 		{
-			CalCtx.followSlamHmd = pickHmd;
+			CalCtx.followSlamHmd = pickHmd || pickNoTracker;
+			CalCtx.noHeadTracker = pickNoTracker;
 			if (CalCtx.validProfile)
 				SaveProfile(CalCtx);
 		}
@@ -766,7 +788,7 @@ void UserInterface::RenderSettings()
 		"Continuously re-aligns SLAM-tracked devices (controllers etc.) to the calibrated space by comparing the headset's SLAM pose with the tracker-driven pose.",
 		&CalCtx.continuousSync, colW);
 	if (CheckboxRow("Hide Head Tracker",
-		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Needs HMD Driven, and pauses itself while you calibrate.",
+		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Needs HMD Driven with a tracker, and pauses itself while you calibrate.",
 		&CalCtx.hideHeadTracker, colW) && CalCtx.validProfile)
 		SaveProfile(CalCtx);
 

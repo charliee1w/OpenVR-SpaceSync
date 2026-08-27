@@ -596,7 +596,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
-	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid;
+	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid && !ctx.noHeadTracker;
 
 	// Follow mode: send the HMD command first so the driver is already in follow mode when the
 	// head tracker gets its transform. Otherwise transforms first, HMD command last.
@@ -891,9 +891,16 @@ void CalibrationTick(double time)
 		Detection.Clear();
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 		{
-			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_GenericTracker)
+			auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
+
+			bool usable = deviceClass == vr::TrackedDeviceClass_GenericTracker
+				|| (ctx.noHeadTracker && deviceClass == vr::TrackedDeviceClass_Controller);
+			if (!usable)
 				continue;
 			if (!ctx.devicePoses[id].bPoseIsValid)
+				continue;
+
+			if (GetDeviceTrackingSystem(id) == hmdSystem)
 				continue;
 
 			Detection.candidates.push_back(id);
@@ -902,7 +909,10 @@ void CalibrationTick(double time)
 		if (Detection.candidates.empty())
 		{
 			ctx.state = CalibrationState::None;
-			CalCtx.Log("No trackers from a different tracking system detected, aborting!\n");
+			if (ctx.noHeadTracker)
+				CalCtx.Log("No tracker or controller from a different tracking system detected, aborting! Turn on the device you want to hold against your head.\n");
+			else
+				CalCtx.Log("No trackers from a different tracking system detected, aborting!\n");
 			return;
 		}
 
