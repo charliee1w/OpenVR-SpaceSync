@@ -470,7 +470,7 @@ namespace ui
 		return changed;
 	}
 
-	bool Stepper(const char* id, double* value, double step, int decimals, float designWidth)
+	bool Stepper(const char* id, double* value, double step, int decimals, float designWidth, bool enabled)
 	{
 		const float btnW = px(28.0f), btnH = px(34.0f), gap = px(5.0f);
 		const float boxW = px(designWidth) - 2.0f * (btnW + gap);
@@ -482,26 +482,26 @@ namespace ui
 		ImVec2 p = ImGui::GetCursorScreenPos();
 		ImGui::InvisibleButton("value", ImVec2(boxW, btnH));
 		dl->AddRectFilled(p, ImVec2(p.x + boxW, p.y + btnH), Col(P.inputBg), px(4.0f));
-		dl->AddRect(p, ImVec2(p.x + boxW, p.y + btnH), Col(P.borderStrong), px(4.0f));
+		dl->AddRect(p, ImVec2(p.x + boxW, p.y + btnH), Col(P.borderStrong, enabled ? 1.0f : 0.5f), px(4.0f));
 		char buf[64];
 		std::snprintf(buf, sizeof buf, "%.*f", decimals, *value);
 		ImVec2 ts = TextSize(F.mono, 13.0f, buf);
-		dl->AddText(F.mono, px(13.0f), ImVec2(p.x + px(10.0f), p.y + (btnH - ts.y) * 0.5f), Col(P.textStrong), buf);
+		dl->AddText(F.mono, px(13.0f), ImVec2(p.x + px(10.0f), p.y + (btnH - ts.y) * 0.5f), Col(enabled ? P.textStrong : P.textDisabled), buf);
 
 		for (int i = 0; i < 2; i++)
 		{
 			ImGui::SameLine(0.0f, gap);
 			ImVec2 b = ImGui::GetCursorScreenPos();
 			ImGui::InvisibleButton(i == 0 ? "dec" : "inc", ImVec2(btnW, btnH));
-			bool hovered = HoverHand();
-			if (ImGui::IsItemClicked())
+			bool hovered = enabled && HoverHand();
+			if (enabled && ImGui::IsItemClicked())
 			{
 				*value += (i == 0 ? -step : step);
 				changed = true;
 			}
-			dl->AddRectFilled(b, ImVec2(b.x + btnW, b.y + btnH), Col(hovered ? P.stepHover : P.button), px(4.0f));
-			dl->AddRect(b, ImVec2(b.x + btnW, b.y + btnH), Col(P.borderButton), px(4.0f));
-			DrawIcon(dl, i == 0 ? Icon::Minus : Icon::Plus, ImVec2(b.x + btnW * 0.5f, b.y + btnH * 0.5f), 11.0f, Col(hovered ? 0xffffff : P.textButton), 1.4f);
+			dl->AddRectFilled(b, ImVec2(b.x + btnW, b.y + btnH), Col(hovered ? P.stepHover : P.button, enabled ? 1.0f : 0.5f), px(4.0f));
+			dl->AddRect(b, ImVec2(b.x + btnW, b.y + btnH), Col(P.borderButton, enabled ? 1.0f : 0.5f), px(4.0f));
+			DrawIcon(dl, i == 0 ? Icon::Minus : Icon::Plus, ImVec2(b.x + btnW * 0.5f, b.y + btnH * 0.5f), 11.0f, Col(hovered ? 0xffffff : (enabled ? P.textButton : P.textDisabled), enabled ? 1.0f : 0.6f), 1.4f);
 		}
 
 		ImGui::PopID();

@@ -187,6 +187,19 @@ static float AvailDesignWidth()
 	return std::max(200.0f, (ImGui::GetIO().DisplaySize.x - 2.0f * px(24.0f)) / S());
 }
 
+static const float PageWidth = 900.0f;
+
+// Left inset that keeps the page centred once the window is wider than the layout needs.
+static float PageInset()
+{
+	return std::max(0.0f, (AvailDesignWidth() - PageWidth) * 0.5f);
+}
+
+static float PageDesignWidth()
+{
+	return std::min(PageWidth, AvailDesignWidth());
+}
+
 UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 {
 	ui::SetContentScale(CalCtx.uiScale);
@@ -235,6 +248,10 @@ UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24.0f), px(24.0f)));
 		if (ImGui::BeginChild("content", ImVec2(W, contentHeight_), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollWithMouse * 0))
 		{
+			const float inset = px(PageInset());
+			if (inset > 0.0f)
+				ImGui::Indent(inset);
+
 			switch (tab_)
 			{
 			case Tab::Calibration:
@@ -247,6 +264,9 @@ UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 				RenderSettings();
 				break;
 			}
+
+			if (inset > 0.0f)
+				ImGui::Unindent(inset);
 		}
 		ImGui::EndChild();
 		ImGui::PopStyleVar();
@@ -316,7 +336,7 @@ void UserInterface::RenderTabs()
 
 	dl->AddRectFilled(ImVec2(wp.x, wp.y + y0 + h - 1.0f), ImVec2(wp.x + W, wp.y + y0 + h), Col(P.border));
 
-	ImGui::SetCursorPos(ImVec2(px(24.0f), y0));
+	ImGui::SetCursorPos(ImVec2(px(24.0f + PageInset()), y0));
 	if (TabItem("Calibration", tab_ == Tab::Calibration)) tab_ = Tab::Calibration;
 	ImGui::SameLine();
 	if (TabItem("Smoothing", tab_ == Tab::Smoothing)) tab_ = Tab::Smoothing;
@@ -337,7 +357,7 @@ void UserInterface::RenderFooter()
 
 	dl->AddRectFilled(ImVec2(wp.x, wp.y + y0), ImVec2(wp.x + W, wp.y + H), Col(P.titleBar));
 	dl->AddRectFilled(ImVec2(wp.x, wp.y + y0), ImVec2(wp.x + W, wp.y + y0 + 1.0f), Col(P.border));
-	DrawText(dl, F.regular, 11.5f, ImVec2(wp.x + px(24.0f), wp.y + y0 + px(9.0f)), P.textFooter, kCreditLine);
+	DrawText(dl, F.regular, 11.5f, ImVec2(wp.x + px(24.0f + PageInset()), wp.y + y0 + px(9.0f)), P.textFooter, kCreditLine);
 	ImGui::Dummy(ImVec2(W, H - y0));
 }
 
@@ -454,7 +474,7 @@ void UserInterface::RenderEdit(const Status& status)
 		VSpace(22.0f);
 	}
 
-	const float maxW = std::min(760.0f, AvailDesignWidth());
+	const float maxW = std::min(760.0f, PageDesignWidth());
 	const float x0 = ImGui::GetCursorPosX();
 
 	// Back link + step size pills
@@ -490,12 +510,21 @@ void UserInterface::RenderEdit(const Status& status)
 		VSpace(18.0f);
 	}
 
-	struct Field { const char* label; double* value; double stepMul; };
+	// In HMD Driven the runtime alignment re-nulls yaw and translation against the head, so edits to
+	// those cancel out again. Only what the alignment cannot absorb still bites.
+	struct Field { const char* label; double* value; double stepMul; bool worksInHmdDriven; };
 	Field rows[3][3] = {
-		{ { "Yaw", &CalCtx.calibratedRotation(1), 1.0 }, { "Pitch", &CalCtx.calibratedRotation(2), 1.0 }, { "Roll", &CalCtx.calibratedRotation(0), 1.0 } },
-		{ { "X", &CalCtx.calibratedTranslation(0), 1.0 }, { "Y", &CalCtx.calibratedTranslation(1), 1.0 }, { "Z", &CalCtx.calibratedTranslation(2), 1.0 } },
-		{ { "Scale", &CalCtx.calibratedScale, 0.01 }, { "HMD Scale", &CalCtx.hmdScale, 0.01 }, { nullptr, nullptr, 0.0 } },
+		{ { "Yaw", &CalCtx.calibratedRotation(1), 1.0, false }, { "Pitch", &CalCtx.calibratedRotation(2), 1.0, true }, { "Roll", &CalCtx.calibratedRotation(0), 1.0, true } },
+		{ { "X", &CalCtx.calibratedTranslation(0), 1.0, false }, { "Y", &CalCtx.calibratedTranslation(1), 1.0, false }, { "Z", &CalCtx.calibratedTranslation(2), 1.0, false } },
+		{ { "Scale", &CalCtx.calibratedScale, 0.01, false }, { "HMD Scale", &CalCtx.hmdScale, 0.01, true }, { nullptr, nullptr, 0.0, false } },
 	};
+
+	if (CalCtx.followSlamHmd)
+	{
+		TextWrapped(F.regular, 12.0f, P.textDim, maxW,
+			"Greyed out fields do nothing in HMD Driven mode: the runtime alignment measures yaw and position against your head every frame and undoes those edits within a few seconds. Switch to Lighthouse Driven to use them.");
+		VSpace(14.0f);
+	}
 
 	const float colW = (maxW - 2.0f * 14.0f) / 3.0f;
 	for (int r = 0; r < 3; r++)
@@ -507,13 +536,14 @@ void UserInterface::RenderEdit(const Status& status)
 			const Field& f = rows[r][col];
 			if (!f.label)
 				continue;
+			const bool live = f.worksInHmdDriven || !CalCtx.followSlamHmd;
 			float x = x0 + col * px(colW + 14.0f);
 			ImGui::SetCursorPos(ImVec2(x, yRow));
-			Text(F.regular, 12.5f, P.textMuted, f.label);
+			Text(F.regular, 12.5f, live ? P.textMuted : P.textDisabled, f.label);
 			ImGui::SetCursorPos(ImVec2(x, yRow + labelH + px(6.0f)));
 			char id[32];
 			std::snprintf(id, sizeof id, "##field%d%d", r, col);
-			Stepper(id, f.value, editStep_ * f.stepMul, 8, colW);
+			Stepper(id, f.value, editStep_ * f.stepMul, 8, colW, live);
 		}
 		ImGui::SetCursorPos(ImVec2(x0, yRow + labelH + px(6.0f + 34.0f)));
 		ImGui::Dummy(ImVec2(0.0f, 0.0f));
@@ -586,7 +616,7 @@ namespace
 
 void UserInterface::RenderSmoothing()
 {
-	const float maxW = std::min(820.0f, AvailDesignWidth());
+	const float maxW = std::min(820.0f, PageDesignWidth());
 	bool changed = false;
 
 	Text(F.regular, 13.0f, P.green, "NOTE: Changes here take effect instantly, no need to re-calibrate.");
@@ -604,13 +634,6 @@ void UserInterface::RenderSmoothing()
 	SectionHeader("Headset Tracker", maxW);
 	ParamSliders(CalCtx.headFilterParams, changed, maxW);
 
-	VSpace(16.0f);
-	SectionHeader("Space Alignment", maxW);
-	TextWrapped(F.regular, 12.5f, P.textDim, maxW,
-		"The alignment between headset space and lighthouse space is averaged over a few seconds "
-		"of calm head movement and only ever changes in one step when the headset really re-localises. "
-		"There is nothing to tune here anymore.");
-
 	if (changed)
 		SendOneEuroParams();
 }
@@ -620,7 +643,7 @@ void UserInterface::RenderSettings()
 	Text(F.regular, 13.0f, P.yellow, "NOTE: Most settings below require re-calibration to be applied");
 	VSpace(16.0f);
 
-	const float fullW = std::min(900.0f, AvailDesignWidth());
+	const float fullW = PageDesignWidth();
 	const float colW = (fullW - 40.0f) * 0.5f;
 	const float cardW = (fullW - 12.0f) * 0.5f;
 
@@ -762,12 +785,38 @@ void UserInterface::RenderSettings()
 		if (valueSlider("##prediction", "Prediction Time", "How many frames of prediction SteamVR applies to the tracker. Some wireless solutions may need more prediction to feel smooth.", &pred, 0.0, 10.0, "%.1f", nullptr))
 			CalCtx.predictionTime = (float)pred;
 
-		double scaleV = CalCtx.uiScale;
-		bool scaleDone = false;
-		if (valueSlider("##uiscale", "UI Scale", "Size of text and controls in this window and in the SteamVR dashboard overlay.", &scaleV, 0.8, 2.0, "%.2f", &scaleDone))
-			CalCtx.uiScale = (float)scaleV;
-		if (scaleDone && CalCtx.validProfile)
-			SaveProfile(CalCtx);
+		{
+			const float scales[4] = { 1.0f, 1.25f, 1.5f, 2.0f };
+			const float y = ImGui::GetCursorPosY();
+			const float pillH = TextSize(F.mono, 12.0f, "0").y + px(10.0f);
+			const float th = TextSize(F.regular, 13.0f, "UI Scale").y;
+
+			ImGui::SetCursorPos(ImVec2(rx, y + (pillH - th) * 0.5f));
+			Text(F.regular, 13.0f, P.text, "UI Scale");
+
+			float x = rx + px(labelW + 14.0f);
+			for (int i = 0; i < 4; i++)
+			{
+				char buf[8];
+				std::snprintf(buf, sizeof buf, "%.2f", scales[i]);
+				const bool active = CalCtx.uiScale > scales[i] - 0.001f && CalCtx.uiScale < scales[i] + 0.001f;
+
+				ImGui::SetCursorPos(ImVec2(x, y));
+				if (Pill(buf, active) && !active)
+				{
+					CalCtx.uiScale = scales[i];
+					if (CalCtx.validProfile)
+						SaveProfile(CalCtx);
+				}
+				x += TextSize(F.mono, 12.0f, buf).x + 2.0f * px(10.0f) + px(6.0f);
+			}
+
+			ImGui::SetCursorPos(ImVec2(rx, y + pillH));
+			VSpace(8.0f);
+			ImGui::SetCursorPosX(rx);
+			Hint("Size of text and controls in this window and in the SteamVR dashboard overlay.", colW);
+			VSpace(24.0f);
+		}
 
 		ImGui::SetCursorPosX(rx);
 		Text(F.regular, 13.0f, P.textMuted, "Calibration Speed");

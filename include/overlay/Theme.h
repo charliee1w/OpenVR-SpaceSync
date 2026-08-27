@@ -106,7 +106,7 @@ namespace ui
 	void Hint(const char* text, float designWidth);
 
 	bool Slider(const char* id, double* value, double minValue, double maxValue, float designWidth);
-	bool Stepper(const char* id, double* value, double step, int decimals, float designWidth);
+	bool Stepper(const char* id, double* value, double step, int decimals, float designWidth, bool enabled = true);
 	bool Pill(const char* label, bool active, ImFont* font = nullptr, float fontSize = 12.0f);
 
 	void SectionHeader(const char* label, float designWidth);
