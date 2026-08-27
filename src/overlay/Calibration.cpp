@@ -143,8 +143,8 @@ static const ModelScaleEntry ModelScales[] = {
 
 static double GetLighthouseModelScale(uint32_t id)
 {
-	if (id == vr::k_unTrackedDeviceIndexInvalid) 
-		return 1.0;
+	if (id == vr::k_unTrackedDeviceIndexInvalid)
+		return 0.0;
 
 	std::string model = GetDeviceModelNumber(id);
 	std::transform(model.begin(), model.end(), model.begin(),
@@ -156,7 +156,7 @@ static double GetLighthouseModelScale(uint32_t id)
 			return entry.scale;
 	}
 
-	return 1.0;
+	return 0.0;
 }
 
 static double AngularSpeedBetween(const Eigen::Matrix3d &cur, const Eigen::Matrix3d &prev, double dt)
@@ -631,7 +631,8 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (applyCalibration)
 		{
-			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id) / ctx.targetModelScale;
+			double known = GetLighthouseModelScale(id);
+			double deviceScale = ctx.calibratedScale * (known > 0.0 ? known : ctx.targetModelScale) / ctx.targetModelScale;
 			protocol::Request req(protocol::RequestSetDeviceTransform);
 			req.setDeviceTransform = {
 				id,
@@ -1045,6 +1046,8 @@ void CalibrationTick(double time)
 		double calScale = 1.0;
 		ctx.calibratedScale = calScale;
 		ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
+		if (ctx.targetModelScale <= 0.0)
+			ctx.targetModelScale = 1.0;
 
 		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
 

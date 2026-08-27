@@ -150,8 +150,6 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		mount.reset();
 		refine.reset();
 		refinePrimed = false;
-		orientation.reset();
-		orientationWasValid = false;
 		{
 			std::lock_guard<std::mutex> lock(trackerSampleMutex);
 			trackerSample.valid = false;
@@ -383,54 +381,12 @@ bool ServerTrackedDeviceProvider::DetectHmdFrameJump(const vr::DriverPose_t& pos
 
 	double tilt = quaternionAngleRad(quaternionNormalize(step * quaternionConjugate(quaternionProjectYaw(step))));
 	if (tilt > 0.5 * POSE_PI / 180.0 || distance > 10.0)
-	{
-		LOG("Headset frame stepped %.2f deg / %.1f cm with %.2f deg of tilt, that is not a re-localisation, leaving it to the drift estimator",
-			angle * 180.0 / POSE_PI, distance * 100.0, tilt * 180.0 / POSE_PI);
 		return false;
-	}
 
 	jumpYaw = quaternionYawRad(quaternionProjectYaw(step));
 	jumpTranslation = stepTranslation;
 	w.jumps++;
 	return true;
-}
-
-void ServerTrackedDeviceProvider::UpdateOrientationModel(const vr::HmdQuaternion_t& headRotationBase, const vr::HmdQuaternion_t& rawRotation,
-	const vr::HmdVector3d_t& rawPosition, double confidence, double dt, double nowSeconds)
-{
-	// Base pose, not the refined one: neither estimator may see the other's output.
-	vr::HmdQuaternion_t residual = quaternionNormalize(
-		headRotationBase * quaternionConjugate(rawRotation) * quaternionConjugate(quaternionFromYaw(drift.estimator.yaw)));
-	vr::HmdVector3d_t m = quaternionToRotationVector(residual);
-	double phi = quaternionYawRad(rawRotation);
-
-	orientation.add(phi, m.v[0], m.v[2], confidence > 0.5 ? confidence * dt : 0.0, dt);
-
-	if (orientation.due())
-	{
-		bool accepted = orientation.solve();
-		bool changed = accepted != orientationWasValid;
-		if (changed || (accepted && nowSeconds - orientationLogTime > 30.0))
-		{
-			orientationLogTime = nowSeconds;
-			double deg = 180.0 / POSE_PI;
-			LOG("Orientation model: %s, %d/%d directions, aliasing %.2f, cross-check %.2f (needs < %.2f), tilt (%.2f, %.2f) deg, mount harmonic (%.2f, %.2f) deg, warp %.2f deg, %u solves / %u rejected",
-				accepted ? "accepted" : "rejected",
-				orientation.occupied, (int)align::OrientationModel::Bins, orientation.aliasing,
-				orientation.nullSse > 0.0 ? orientation.press / orientation.nullSse : 9.99, 1.0 - orientation.cvMargin,
-				orientation.dc[0] * deg, orientation.dc[1] * deg,
-				orientation.h1[0] * deg, orientation.h1[1] * deg,
-				orientation.appliedWarpDeg(), orientation.solves, orientation.rejects);
-		}
-		orientationWasValid = accepted;
-	}
-
-	orientation.slew(dt);
-
-	vr::HmdVector3d_t tiltVector = orientation.tiltAt(phi);
-	drift.estimator.setTilt(quaternionFromRotationVector(tiltVector), rawPosition, SlamToCorrectedScale());
-	drift.rotation = drift.estimator.rotation();
-	drift.translation = drift.estimator.translation;
 }
 
 void ServerTrackedDeviceProvider::StoreTrackerSample(const vr::DriverPose_t& pose)
@@ -540,8 +496,6 @@ void ServerTrackedDeviceProvider::StoreTrackerSample(const vr::DriverPose_t& pos
 				double gain = f.accNum / f.accDen;
 				if (gain < 0.0) gain = 0.0;
 				if (gain > 1.0) gain = 1.0;
-				if (!f.accDecided || std::fabs(gain - f.accGain) > 0.1)
-					LOG("Tracker acceleration is %.0f %% signal (was %.0f %%), prediction uses it at that weight", gain * 100.0, f.accGain * 100.0);
 				f.accGain = gain;
 				f.accDecided = true;
 				f.accNum *= 0.5;
@@ -749,8 +703,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 							driftLog.yawDeg = quaternionYawDeg(drift.rotation);
 							driftLog.translation = drift.translation;
-							LOG("Headset re-localised: frame stepped %.2f deg / %.1f cm, alignment followed it exactly, drift yaw now %.2f deg (%u so far)",
-								jumpYaw * 180.0 / POSE_PI, vecNorm(jumpTranslation) * 100.0, driftLog.yawDeg, hmdFrame.jumps);
 						}
 					}
 
@@ -922,7 +874,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						}
 					}
 
-					UpdateOrientationModel(headRotationBase, rawRotation, vecFromArray(rawPosition), confidence, dtRefine, nowSeconds);
 				}
 
 				NoteTrackerState(trackerOK, true, tpLog, quaternionYawDeg(ts.rotation), relativeYawValid, relativeYaw);

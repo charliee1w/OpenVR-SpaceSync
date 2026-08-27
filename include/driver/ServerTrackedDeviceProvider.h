@@ -74,9 +74,6 @@ private:
 
 	bool DetectHmdFrameJump(const vr::DriverPose_t &pose, double &jumpYaw, vr::HmdVector3d_t &jumpTranslation);
 
-	void UpdateOrientationModel(const vr::HmdQuaternion_t &headRotationBase, const vr::HmdQuaternion_t &rawRotation,
-		const vr::HmdVector3d_t &rawPosition, double confidence, double dt, double nowSeconds);
-
 	align::ClockAligner clock;
 	double clockLogTime = 0.0;
 	double lastHmdTime = -1.0;
@@ -143,10 +140,6 @@ private:
 	LARGE_INTEGER refineLast = {};
 	bool refinePrimed = false;
 	double refineLogTime = 0.0;
-
-	align::OrientationModel orientation;
-	double orientationLogTime = 0.0;
-	bool orientationWasValid = false;
 
 	struct EffectiveOffsets
 	{

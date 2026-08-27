@@ -107,7 +107,7 @@ struct CalibrationContext
 
 	// The look-around sequence drives both the wizard and the voice cues, one second per step.
 	static const int SequenceCycle = 8;
-	static constexpr double StepSeconds = 1.0;
+	static constexpr double StepSeconds = 1.5;
 
 	double sequenceStart = 0.0;
 	int sequenceStep = 0;
