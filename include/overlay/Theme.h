@@ -11,6 +11,7 @@ namespace ui
 	{
 		unsigned pageBg       = 0x101215;
 		unsigned card         = 0x191c21;
+		unsigned cardActive   = 0x1c2027;
 		unsigned titleBar     = 0x15181c;
 		unsigned border       = 0x24282e;
 		unsigned borderStrong = 0x2a2e35;

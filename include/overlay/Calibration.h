@@ -51,9 +51,9 @@ struct CalibrationContext
 
 	bool fallbackToSlam = true;
 	bool enableAngularVelocity = false;
-	bool continuousSync = true;
-	bool followSlamHmd = false;
-	bool hideHeadTracker = false;
+	bool continuousSync = false;
+	bool followSlamHmd = true;
+	bool hideHeadTracker = true;
 	float predictionTime = 1.0f;
 	float uiScale = 1.25f;            // UI content scale
 
@@ -102,7 +102,7 @@ struct CalibrationContext
 		trackerSerial = "";
 		enabled = false;
 		validProfile = false;
-		continuousSync = true;
+		continuousSync = false;
 	}
 
 	// The look-around sequence drives both the wizard and the voice cues, one second per step.

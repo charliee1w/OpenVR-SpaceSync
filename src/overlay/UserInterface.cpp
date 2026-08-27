@@ -164,14 +164,14 @@ UserInterface::Status UserInterface::BuildStatus(const VRState& state) const
 	}
 	else if (CalCtx.followSlamHmd)
 	{
-		s.headline = "Follow mode active";
+		s.headline = "HMD Driven active";
 		s.detail = s.tracker->serial;
 		s.color = P.green;
 		s.ok = true;
 	}
 	else
 	{
-		s.headline = "Override active";
+		s.headline = "Lighthouse Driven active";
 		s.detail = s.tracker->serial;
 		s.color = P.green;
 		s.ok = true;
@@ -620,7 +620,93 @@ void UserInterface::RenderSettings()
 	Text(F.regular, 13.0f, P.yellow, "NOTE: Most settings below require re-calibration to be applied");
 	VSpace(16.0f);
 
-	const float colW = (std::min(900.0f, AvailDesignWidth()) - 40.0f) * 0.5f;
+	const float fullW = std::min(900.0f, AvailDesignWidth());
+	const float colW = (fullW - 40.0f) * 0.5f;
+	const float cardW = (fullW - 12.0f) * 0.5f;
+
+	SectionHeader("Tracking Method", fullW);
+	VSpace(12.0f);
+
+	{
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+
+		auto methodCard = [&](const char* label, const char* tag, bool recommended,
+			const char* hint, const char* req, bool active) -> bool
+		{
+			const float padX = 16.0f, padY = 15.0f, dotD = 15.0f, gap = 10.0f;
+			const float innerW = cardW - padX * 2.0f;
+
+			ImVec2 labelSize = TextSize(F.semibold, 13.5f, label);
+			ImVec2 tagSize = TextSize(F.semibold, 11.0f, tag);
+			ImVec2 hintSize = TextSize(F.regular, 12.0f, hint, innerW);
+			ImVec2 reqSize = TextSize(F.regular, 12.0f, req, innerW);
+
+			const float headH = std::max(labelSize.y, px(dotD));
+			const float h = px(padY) + headH + px(9.0f) + hintSize.y + px(7.0f) + reqSize.y + px(padY);
+
+			ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::PushID(label);
+			ImGui::InvisibleButton("##method", ImVec2(px(cardW), h));
+			ImGui::PopID();
+			HoverHand();
+			const bool clicked = ImGui::IsItemClicked();
+
+			ImVec2 p1(p.x + px(cardW), p.y + h);
+			dl->AddRectFilled(p, p1, Col(active ? P.cardActive : P.inputBg), px(5.0f));
+			dl->AddRect(p, p1, Col(active ? P.accent : P.borderStrong), px(5.0f), 0, px(1.0f));
+
+			float cy = p.y + px(padY) + headH * 0.5f;
+			ImVec2 c(p.x + px(padX) + px(dotD) * 0.5f, cy);
+			dl->AddCircleFilled(c, px(dotD) * 0.5f, Col(active ? P.accent : P.inputBg));
+			dl->AddCircle(c, px(dotD) * 0.5f, Col(active ? P.accent : P.checkBorder), 0, px(1.0f));
+			if (active)
+				dl->AddCircleFilled(c, px(dotD) * 0.5f - px(3.0f), Col(P.cardActive));
+
+			float tx = p.x + px(padX + dotD + gap);
+			DrawText(dl, F.semibold, 13.5f, ImVec2(tx, cy - labelSize.y * 0.5f), P.textStrong, label);
+
+			float bx = tx + labelSize.x + px(gap);
+			ImVec2 b0(bx, cy - tagSize.y * 0.5f - px(2.0f));
+			ImVec2 b1(bx + tagSize.x + px(14.0f), cy + tagSize.y * 0.5f + px(2.0f));
+			dl->AddRectFilled(b0, b1, Col(recommended ? P.green : P.yellow, 0.12f), px(3.0f));
+			DrawText(dl, F.semibold, 11.0f, ImVec2(bx + px(7.0f), b0.y + px(2.0f)), recommended ? P.green : P.yellow, tag);
+
+			float ty = p.y + px(padY) + headH + px(9.0f);
+			ImGui::SetCursorScreenPos(ImVec2(p.x + px(padX), ty));
+			TextWrapped(F.regular, 12.0f, P.textMuted, innerW, hint);
+			ImGui::SetCursorScreenPos(ImVec2(p.x + px(padX), ty + hintSize.y + px(7.0f)));
+			TextWrapped(F.regular, 12.0f, P.textDim, innerW, req);
+
+			ImGui::SetCursorScreenPos(ImVec2(p.x, p1.y));
+			return clicked;
+		};
+
+		const float cardsX = ImGui::GetCursorPosX();
+		const float cardsY = ImGui::GetCursorPosY();
+
+		bool pickHmd = methodCard("HMD Driven", "Recommended", true,
+			"The headset owns the tracking space and your lighthouse devices follow it. This keeps everything lined up even when the headset silently re-centres.",
+			"Requires a tracker on top of your head.", CalCtx.followSlamHmd);
+		float cardsBottom = ImGui::GetCursorPosY();
+
+		ImGui::SetCursorPos(ImVec2(cardsX + px(cardW + 12.0f), cardsY));
+		bool pickLighthouse = methodCard("Lighthouse Driven", "Not recommended", false,
+			"The tracker on your head owns the tracking space and the headset follows it. Not recommended on Galaxy XR, Vive Pro or Pico 4, where it can cause jitter.",
+			"Requires a tracker on top of your head.", !CalCtx.followSlamHmd);
+		cardsBottom = std::max(cardsBottom, ImGui::GetCursorPosY());
+
+		ImGui::SetCursorPos(ImVec2(cardsX, cardsBottom));
+
+		if ((pickHmd && !CalCtx.followSlamHmd) || (pickLighthouse && CalCtx.followSlamHmd))
+		{
+			CalCtx.followSlamHmd = pickHmd;
+			if (CalCtx.validProfile)
+				SaveProfile(CalCtx);
+		}
+	}
+
+	VSpace(28.0f);
+
 	const float x0 = ImGui::GetCursorPosX();
 	const float y0 = ImGui::GetCursorPosY();
 
@@ -634,12 +720,8 @@ void UserInterface::RenderSettings()
 	CheckboxRow("Relative Calibration",
 		"Continuously re-aligns SLAM-tracked devices (controllers etc.) to the calibrated space by comparing the headset's SLAM pose with the tracker-driven pose.",
 		&CalCtx.continuousSync, colW);
-	if (CheckboxRow("Follow SLAM HMD",
-		"Lighthouse devices follow the SLAM HMD instead of the tracker driving the headset. Use this when your streamer shows a rotated view or black borders after the headset silently re-localises. Takes effect within a second.",
-		&CalCtx.followSlamHmd, colW) && CalCtx.validProfile)
-		SaveProfile(CalCtx);
 	if (CheckboxRow("Hide Head Tracker",
-		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Only does anything with Follow SLAM HMD on, and pauses itself while you calibrate.",
+		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Needs HMD Driven, and pauses itself while you calibrate.",
 		&CalCtx.hideHeadTracker, colW) && CalCtx.validProfile)
 		SaveProfile(CalCtx);
 
