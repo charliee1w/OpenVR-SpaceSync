@@ -638,9 +638,10 @@ void UserInterface::RenderSettings()
 		"Lighthouse devices follow the SLAM HMD instead of the tracker driving the headset. Use this when your streamer shows a rotated view or black borders after the headset silently re-localises. Takes effect within a second.",
 		&CalCtx.followSlamHmd, colW) && CalCtx.validProfile)
 		SaveProfile(CalCtx);
-	CheckboxRow("Discard Calibrated Offset",
-		"Feeds raw tracker data with only the mounting offset applied, discarding all SLAM tracking. Advanced: yaw must be aligned by re-centering the headset; tested only on Pico.",
-		&CalCtx.enableNative, colW);
+	if (CheckboxRow("Hide Head Tracker",
+		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Only does anything with Follow SLAM HMD on, and pauses itself while you calibrate.",
+		&CalCtx.hideHeadTracker, colW) && CalCtx.validProfile)
+		SaveProfile(CalCtx);
 
 	float leftBottom = ImGui::GetCursorPosY();
 
@@ -692,9 +693,9 @@ void UserInterface::RenderSettings()
 
 		struct SpeedOpt { const char* label; const char* hint; CalibrationContext::Speed speed; };
 		const SpeedOpt speeds[3] = {
-			{ "Fast", "Collects only a few samples. Quickest option, but small mistakes during calibration show up as inaccuracy.", CalibrationContext::FAST },
-			{ "Slow", "Recommended. Takes slightly longer than Fast and stays accurate.", CalibrationContext::SLOW },
-			{ "Very Slow", "Collects the most samples. Use this when you want the most precise result.", CalibrationContext::VERY_SLOW },
+			{ "Fast", "One pass through the look-around sequence. Quickest option, but small mistakes during calibration show up as inaccuracy.", CalibrationContext::FAST },
+			{ "Slow", "Recommended. Two passes through the look-around sequence, so the same samples cover more directions.", CalibrationContext::SLOW },
+			{ "Very Slow", "Three passes and the most samples. Use this when you want the most precise result.", CalibrationContext::VERY_SLOW },
 		};
 		for (int i = 0; i < 3; i++)
 		{
@@ -766,13 +767,13 @@ void UserInterface::RenderWizard()
 		}
 		else if (st == CalibrationState::Sampling)
 		{
-			int k = (int)(fraction * kStepCount);
-			k = std::min(kStepCount - 1, std::max(0, k));
+			const int total = CalCtx.sequenceSteps > 0 ? CalCtx.sequenceSteps : CalCtx.SequenceStepCount();
+			const int step = std::min(total - 1, std::max(0, CalCtx.sequenceStep));
 			char buf[32];
-			std::snprintf(buf, sizeof buf, "Step %d of %d", k + 1, kStepCount + 1);
+			std::snprintf(buf, sizeof buf, "Step %d of %d", step + 1, total);
 			counter = buf;
-			title = kSteps[k].title;
-			icon = kSteps[k].icon;
+			title = kSteps[step % kStepCount].title;
+			icon = kSteps[step % kStepCount].icon;
 			fill = fraction;
 		}
 		else
@@ -780,9 +781,7 @@ void UserInterface::RenderWizard()
 			if (CalCtx.lastCalibrationOk)
 			{
 				done = true;
-				char buf[32];
-				std::snprintf(buf, sizeof buf, "Step %d of %d", kStepCount + 1, kStepCount + 1);
-				counter = buf;
+				counter = "Complete";
 				title = "Done";
 				icon = Icon::Check;
 				iconColor = P.green;

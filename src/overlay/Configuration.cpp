@@ -82,7 +82,6 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (ctx.hmdScale <= 0.0)
 		ctx.hmdScale = 1.0;
 
-	ctx.enableNative = obj["native"].get<bool>();
 	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
 	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
 
@@ -95,6 +94,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.followSlamHmd = obj["followSlam"].get<bool>();
 	else
 		ctx.followSlamHmd = false;
+
+	if (obj["hideHeadTracker"].is<bool>())
+		ctx.hideHeadTracker = obj["hideHeadTracker"].get<bool>();
+	else
+		ctx.hideHeadTracker = false;
 
 	if (obj["uiScale"].is<double>())
 		ctx.uiScale = (float)obj["uiScale"].get<double>();
@@ -190,11 +194,11 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["targetModelScale"].set<double>(ctx.targetModelScale);
 	profile["hmdScale"].set<double>(ctx.hmdScale);
 
-	profile["native"].set<bool>(ctx.enableNative);
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
 	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);
 	profile["continuousSync"].set<bool>(ctx.continuousSync);
 	profile["followSlam"].set<bool>(ctx.followSlamHmd);
+	profile["hideHeadTracker"].set<bool>(ctx.hideHeadTracker);
 	double uiScale = ctx.uiScale;
 	profile["uiScale"].set<double>(uiScale);
 

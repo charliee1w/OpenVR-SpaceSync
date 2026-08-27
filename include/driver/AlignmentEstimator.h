@@ -105,6 +105,7 @@ struct YawTranslationEstimator
 	void reset()
 	{
 		valid = false;
+		tilt = { 1, 0, 0, 0 };
 		weightSum = 0.0;
 		weightSumTranslation = 0.0;
 		cooldown = 0.0;
@@ -133,7 +134,20 @@ struct YawTranslationEstimator
 		return s < lo ? lo : (s > hi ? hi : s);
 	}
 
-	vr::HmdQuaternion_t rotation() const { return quaternionFromYaw(yaw); }
+	vr::HmdQuaternion_t tilt = { 1, 0, 0, 0 };
+
+	vr::HmdQuaternion_t rotationFor(double yawValue) const { return quaternionNormalize(tilt * quaternionFromYaw(yawValue)); }
+	vr::HmdQuaternion_t rotation() const { return rotationFor(yaw); }
+
+	// t' = t + (tilt - tilt') * R(yaw) * (scale*raw)
+	void setTilt(const vr::HmdQuaternion_t& newTilt, const vr::HmdVector3d_t& raw, double scale)
+	{
+		if (!valid) { tilt = quaternionNormalize(newTilt); return; }
+		vr::HmdVector3d_t before = quaternionRotateVector(rotation(), vecScale(raw, scale));
+		tilt = quaternionNormalize(newTilt);
+		vr::HmdVector3d_t after = quaternionRotateVector(rotation(), vecScale(raw, scale));
+		translation = vecAdd(translation, vecSub(before, after));
+	}
 
 	void resetDetectors()
 	{
@@ -141,9 +155,9 @@ struct YawTranslationEstimator
 		translationDetector.reset();
 	}
 
-	static vr::HmdVector3d_t translationFor(double yawValue, const vr::HmdVector3d_t& corrected, const vr::HmdVector3d_t& raw, double scale)
+	vr::HmdVector3d_t translationFor(double yawValue, const vr::HmdVector3d_t& corrected, const vr::HmdVector3d_t& raw, double scale) const
 	{
-		vr::HmdVector3d_t rotated = quaternionRotateVector(quaternionFromYaw(yawValue), raw);
+		vr::HmdVector3d_t rotated = quaternionRotateVector(rotationFor(yawValue), raw);
 		return vecSub(corrected, vecScale(rotated, scale));
 	}
 
@@ -303,6 +317,34 @@ struct YawTranslationEstimator
 		dT = vecSub(dT, quaternionRotateVector(headRotationBase, dTranslation));
 		yaw = wrapRad(yaw + dYaw);
 		translation = vecAdd(translation, dT);
+		resetDetectors();
+	}
+
+	void rebase(double dYaw, const vr::HmdVector3d_t& dTranslation, double scale)
+	{
+		if (!valid) return;
+
+		double yawNew = wrapRad(yaw - dYaw);
+		vr::HmdVector3d_t translationNew = vecSub(translation,
+			quaternionRotateVector(rotationFor(yawNew), vecScale(dTranslation, scale)));
+
+		lastJumpYaw = wrapRad(yawNew - yaw);
+		lastJumpTranslation = vecSub(translationNew, translation);
+		lastJumpFrames = 0;
+		yaw = yawNew;
+		translation = translationNew;
+
+		vr::HmdQuaternion_t step = quaternionFromYaw(dYaw);
+		meanRaw = vecAdd(quaternionRotateVector(step, meanRaw), dTranslation);
+		lastRaw = vecAdd(quaternionRotateVector(step, lastRaw), dTranslation);
+		for (int i = 0; i < ringCount; i++)
+		{
+			ring[i].raw = vecAdd(quaternionRotateVector(step, ring[i].raw), dTranslation);
+			ring[i].yawInst = wrapRad(ring[i].yawInst - dYaw);
+		}
+
+		cooldown = cooldownSeconds;
+		jumps++;
 		resetDetectors();
 	}
 
@@ -491,6 +533,228 @@ private:
 };
 
 
+// m(phi) = tau + R_head(phi) * eps: tau is the DC term, eps the first harmonic, the rest non-rigid.
+struct OrientationModel
+{
+	static const int Bins = 16;
+	static const int Terms = 5;
+
+	double binForget = 300.0;
+	double minBinWeight = 2.0;
+	int minBins = 9;
+	double maxAliasing = 0.35;
+	double solveInterval = 5.0;
+	double maxTilt = 5.0 * POSE_PI / 180.0;
+	double maxWarp = 1.0 * POSE_PI / 180.0;
+	double cvMargin = 0.15;
+	double slewRate = 0.05 * POSE_PI / 180.0;
+
+	struct Bin
+	{
+		double weight = 0.0;
+		double sumX = 0.0, sumZ = 0.0;
+	};
+
+	Bin bins[Bins] = {};
+	double sinceSolve = 0.0;
+
+	bool validated = false;
+	double dc[2] = { 0, 0 };
+	double h1[2] = { 0, 0 };
+	double warpC[2] = { 0, 0 };
+	double warpS[2] = { 0, 0 };
+	double press = 0.0;
+	double nullSse = 0.0;
+	double aliasing = 1.0;
+	int occupied = 0;
+	uint32_t solves = 0, rejects = 0;
+
+	double appliedDc[2] = { 0, 0 };
+	double appliedWarpC[2] = { 0, 0 };
+	double appliedWarpS[2] = { 0, 0 };
+
+	void reset()
+	{
+		for (int b = 0; b < Bins; b++) bins[b] = Bin();
+		sinceSolve = 0.0;
+		validated = false;
+		for (int i = 0; i < 2; i++)
+		{
+			dc[i] = h1[i] = warpC[i] = warpS[i] = 0.0;
+			appliedDc[i] = appliedWarpC[i] = appliedWarpS[i] = 0.0;
+		}
+		press = nullSse = 0.0;
+		aliasing = 1.0;
+		occupied = 0;
+		solves = rejects = 0;
+	}
+
+	static double binCenter(int b) { return (b + 0.5) * (2.0 * POSE_PI / Bins) - POSE_PI; }
+
+	static void basis(double phi, double* B)
+	{
+		B[0] = 1.0;
+		B[1] = std::cos(phi);
+		B[2] = std::sin(phi);
+		B[3] = std::cos(2.0 * phi);
+		B[4] = std::sin(2.0 * phi);
+	}
+
+	void add(double phi, double mx, double mz, double w, double dt)
+	{
+		double f = std::exp(-dt / binForget);
+		for (int b = 0; b < Bins; b++)
+		{
+			bins[b].weight *= f;
+			bins[b].sumX *= f;
+			bins[b].sumZ *= f;
+		}
+		sinceSolve += dt;
+
+		if (w <= 0.0) return;
+		int b = (int)std::floor((wrapRad(phi) + POSE_PI) / (2.0 * POSE_PI / Bins));
+		if (b < 0) b = 0;
+		if (b >= Bins) b = Bins - 1;
+		bins[b].weight += w;
+		bins[b].sumX += w * mx;
+		bins[b].sumZ += w * mz;
+	}
+
+	bool due() const { return sinceSolve >= solveInterval; }
+
+	bool solve()
+	{
+		sinceSolve = 0.0;
+
+		int idx[Bins];
+		int n = 0;
+		double sumCos = 0.0, sumSin = 0.0;
+		for (int b = 0; b < Bins; b++)
+		{
+			if (bins[b].weight < minBinWeight) continue;
+			idx[n++] = b;
+			sumCos += std::cos(binCenter(b));
+			sumSin += std::sin(binCenter(b));
+		}
+		occupied = n;
+		if (n < minBins) { validated = false; return false; }
+
+		aliasing = std::sqrt(sumCos * sumCos + sumSin * sumSin) / n;
+		if (aliasing > maxAliasing) { validated = false; return false; }
+
+		double phi[Bins], mx[Bins], mz[Bins];
+		for (int i = 0; i < n; i++)
+		{
+			const Bin& bin = bins[idx[i]];
+			phi[i] = binCenter(idx[i]);
+			mx[i] = bin.sumX / bin.weight;
+			mz[i] = bin.sumZ / bin.weight;
+		}
+
+		double pressSum = 0.0, nullSum = 0.0;
+		for (int hold = 0; hold < n; hold++)
+		{
+			double cx[Terms], cz[Terms];
+			if (!fit(n, phi, mx, mz, hold, cx, cz)) { validated = false; return false; }
+			double B[Terms];
+			basis(phi[hold], B);
+			double px = 0.0, pz = 0.0;
+			for (int k = 0; k < Terms; k++) { px += cx[k] * B[k]; pz += cz[k] * B[k]; }
+			double ex = mx[hold] - px, ez = mz[hold] - pz;
+			pressSum += ex * ex + ez * ez;
+			nullSum += mx[hold] * mx[hold] + mz[hold] * mz[hold];
+		}
+		press = pressSum;
+		nullSse = nullSum;
+		solves++;
+
+		if (pressSum >= (1.0 - cvMargin) * nullSum) { validated = false; rejects++; return false; }
+
+		double cx[Terms], cz[Terms];
+		if (!fit(n, phi, mx, mz, -1, cx, cz)) { validated = false; return false; }
+
+		double tiltMag = std::sqrt(cx[0] * cx[0] + cz[0] * cz[0]);
+		double warpMag = std::sqrt(cx[3] * cx[3] + cz[3] * cz[3] + cx[4] * cx[4] + cz[4] * cz[4]);
+		if (tiltMag > maxTilt || warpMag > maxWarp) { validated = false; rejects++; return false; }
+
+		dc[0] = cx[0]; dc[1] = cz[0];
+		h1[0] = std::sqrt(cx[1] * cx[1] + cx[2] * cx[2]);
+		h1[1] = std::sqrt(cz[1] * cz[1] + cz[2] * cz[2]);
+		warpC[0] = cx[3]; warpC[1] = cz[3];
+		warpS[0] = cx[4]; warpS[1] = cz[4];
+		validated = true;
+		return true;
+	}
+
+	void slew(double dt)
+	{
+		if (!validated) return;
+		double step = slewRate * dt;
+		for (int i = 0; i < 2; i++)
+		{
+			appliedDc[i] = toward(appliedDc[i], dc[i], step);
+			appliedWarpC[i] = toward(appliedWarpC[i], warpC[i], step);
+			appliedWarpS[i] = toward(appliedWarpS[i], warpS[i], step);
+		}
+	}
+
+	vr::HmdVector3d_t tiltAt(double phi) const
+	{
+		double c2 = std::cos(2.0 * phi), s2 = std::sin(2.0 * phi);
+		return {
+			appliedDc[0] + appliedWarpC[0] * c2 + appliedWarpS[0] * s2,
+			0.0,
+			appliedDc[1] + appliedWarpC[1] * c2 + appliedWarpS[1] * s2
+		};
+	}
+
+	double appliedTiltDeg() const
+	{
+		return std::sqrt(appliedDc[0] * appliedDc[0] + appliedDc[1] * appliedDc[1]) * 180.0 / POSE_PI;
+	}
+
+	double appliedWarpDeg() const
+	{
+		return std::sqrt(appliedWarpC[0] * appliedWarpC[0] + appliedWarpC[1] * appliedWarpC[1]
+			+ appliedWarpS[0] * appliedWarpS[0] + appliedWarpS[1] * appliedWarpS[1]) * 180.0 / POSE_PI;
+	}
+
+private:
+	static double toward(double current, double target, double step)
+	{
+		double d = target - current;
+		if (d > step) d = step;
+		if (d < -step) d = -step;
+		return current + d;
+	}
+
+	bool fit(int n, const double* phi, const double* mx, const double* mz, int hold, double* cx, double* cz) const
+	{
+		double A[Terms * Terms] = {};
+		double bx[Terms] = {}, bz[Terms] = {};
+		int used = 0;
+		for (int i = 0; i < n; i++)
+		{
+			if (i == hold) continue;
+			double B[Terms];
+			basis(phi[i], B);
+			for (int r = 0; r < Terms; r++)
+			{
+				for (int c = 0; c < Terms; c++) A[r * Terms + c] += B[r] * B[c];
+				bx[r] += B[r] * mx[i];
+				bz[r] += B[r] * mz[i];
+			}
+			used++;
+		}
+		if (used < Terms + 2) return false;
+		double Ax[Terms * Terms];
+		for (int i = 0; i < Terms * Terms; i++) Ax[i] = A[i];
+		if (!solveLinearSystem(Terms, Ax, bx, cx)) return false;
+		return solveLinearSystem(Terms, A, bz, cz);
+	}
+};
+
+
 struct ClockAligner
 {
 	double windowSeconds = 3.0;
@@ -499,6 +763,7 @@ struct ClockAligner
 	double searchStep = 0.005;
 	double minStdRot = 0.25;
 	double minStdPos = 0.08;
+	double minMeanWeight = 0.5;
 	double minCorrelation = 0.85;
 	double minProminence = 0.05;
 	double prominenceDistance = 0.05;
@@ -626,6 +891,9 @@ struct ClockAligner
 	double tauPos() const { return pos.tau; }
 
 	void addHmdPose(double t, const vr::HmdQuaternion_t& rotation, const vr::HmdVector3d_t& position) { push(hmdPoses, hmd, t, rotation, position); }
+
+	void noteHmdDiscontinuity() { hmdPoses.clear(); }
+
 	void addTrackerPose(double t, const vr::HmdQuaternion_t& rotation, const vr::HmdVector3d_t& position) { push(trackerPoses, tracker, t, rotation, position); }
 
 	bool due(double now) const { return now - lastSolve >= solveInterval; }
@@ -687,26 +955,31 @@ private:
 		if (std::sqrt(varH / n) < (channel == 0 ? minStdRot : minStdPos)) return false;
 
 		const int steps = (int)std::floor((searchMax - searchMin) / searchStep + 0.5) + 1;
+		const double weightGate = (channel == 0 ? minStdRot : minStdPos) * minMeanWeight;
 		double corr[128];
 		int bestIdx = -1;
 		bestCorr = -2.0;
 		for (int k = 0; k < steps && k < 128; k++)
 		{
 			double tau = searchMin + k * searchStep;
-			double sumG = 0.0, sumGG = 0.0, sumHG = 0.0, sumH = 0.0, sumHH = 0.0;
+			double sumW = 0.0, sumG = 0.0, sumGG = 0.0, sumHG = 0.0, sumH = 0.0, sumHH = 0.0;
 			int m = 0;
 			for (int i = first; i < hmd.count; i++)
 			{
 				double g;
 				if (!tracker.interpolate(hmd.timeAt(i) + tau, channel, g)) continue;
 				double h = hmd.at(i, channel);
-				sumG += g; sumGG += g * g; sumHG += h * g; sumH += h; sumHH += h * h;
+				double w = h < g ? h : g;
+				if (w <= 0.0) continue;
+				sumW += w;
+				sumG += w * g; sumGG += w * g * g; sumHG += w * h * g; sumH += w * h; sumHH += w * h * h;
 				m++;
 			}
-			if (m < minSamples) { corr[k] = -2.0; continue; }
-			double covHG = sumHG / m - (sumH / m) * (sumG / m);
-			double vH = sumHH / m - (sumH / m) * (sumH / m);
-			double vG = sumGG / m - (sumG / m) * (sumG / m);
+			if (m < minSamples || sumW < weightGate * m) { corr[k] = -2.0; continue; }
+			double mH = sumH / sumW, mG = sumG / sumW;
+			double covHG = sumHG / sumW - mH * mG;
+			double vH = sumHH / sumW - mH * mH;
+			double vG = sumGG / sumW - mG * mG;
 			if (vH <= 1e-12 || vG <= 1e-12) { corr[k] = -2.0; continue; }
 			corr[k] = covHG / std::sqrt(vH * vG);
 			if (corr[k] > bestCorr) { bestCorr = corr[k]; bestIdx = k; }

@@ -72,6 +72,11 @@ private:
 		return 1.0 / (1.0 + l * l + a * a);
 	}
 
+	bool DetectHmdFrameJump(const vr::DriverPose_t &pose, double &jumpYaw, vr::HmdVector3d_t &jumpTranslation);
+
+	void UpdateOrientationModel(const vr::HmdQuaternion_t &headRotationBase, const vr::HmdQuaternion_t &rawRotation,
+		const vr::HmdVector3d_t &rawPosition, double confidence, double dt, double nowSeconds);
+
 	align::ClockAligner clock;
 	double clockLogTime = 0.0;
 	double lastHmdTime = -1.0;
@@ -92,6 +97,15 @@ private:
 		bool decidedAngular = false;
 		bool decidedVelocity = false;
 
+		static const int VelRing = 4;
+		vr::HmdVector3d_t velHistory[VelRing] = {};
+		double velHistoryTime[VelRing] = {};
+		int velCount = 0;
+		int velNext = 0;
+		double accNum = 0.0, accDen = 0.0;
+		double accGain = 0.0;
+		bool accDecided = false;
+
 		void reset()
 		{
 			primed = false;
@@ -99,8 +113,22 @@ private:
 			velWorld = velDevice = velNorm = 0.0;
 			angularDevice = velocityDevice = false;
 			decidedAngular = decidedVelocity = false;
+			velCount = velNext = 0;
+			accNum = accDen = 0.0;
+			accGain = 0.0;
+			accDecided = false;
 		}
 	} frames;
+
+	struct HmdFrameWatch
+	{
+		bool primed = false;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t translation = { 0, 0, 0 };
+		uint32_t jumps = 0;
+
+		void reset() { primed = false; }
+	} hmdFrame;
 
 	struct ResidualDiag
 	{
@@ -115,6 +143,10 @@ private:
 	LARGE_INTEGER refineLast = {};
 	bool refinePrimed = false;
 	double refineLogTime = 0.0;
+
+	align::OrientationModel orientation;
+	double orientationLogTime = 0.0;
+	bool orientationWasValid = false;
 
 	struct EffectiveOffsets
 	{
@@ -155,6 +187,7 @@ private:
 		double position[3] = { 0, 0, 0 };
 		double velocity[3] = { 0, 0, 0 };         // world space, m/s
 		double angularVelocity[3] = { 0, 0, 0 };  // world space, rad/s (axis-angle rate)
+		double acceleration[3] = { 0, 0, 0 };     // world space, m/s^2
 		double linSpeed = 0.0;
 		double angSpeed = 0.0;
 		double poseTimeOffset = 0.0;              // seconds, as reported by the driver
@@ -169,7 +202,7 @@ private:
 	double SlamToCorrectedScaleBase() const
 	{
 		double k = hmdTracker.hmdScale > 0.0 ? 1.0 / hmdTracker.hmdScale : 1.0;
-		return hmdTracker.native ? k : k * hmdTracker.calibrationScale;
+		return k * hmdTracker.calibrationScale;
 	}
 
 	double SlamToCorrectedScale() const { return SlamToCorrectedScaleBase() * (1.0 + refine.scale); }
@@ -190,9 +223,9 @@ private:
 	{
 		// Written last / read first so the pose thread never sees a half-written config.
 		std::atomic<bool> enabled{ false };
-		bool native = false;
 		// Follow SLAM HMD: headset keeps its SLAM pose, lighthouse devices follow it.
 		bool followSlam = false;
+		bool hideHeadTracker = false;
 		bool slamFallback = true;
 		bool enableAngularVelocity = false;
 		float predictionTime = 1.0f;

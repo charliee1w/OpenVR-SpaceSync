@@ -513,7 +513,6 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.hmdID = hmdID;
 	req.setHmdTracker.trackerID = trackerID;
 	req.setHmdTracker.enabled = enabled;
-	req.setHmdTracker.native = CalCtx.enableNative;
 	req.setHmdTracker.slamFallback = CalCtx.fallbackToSlam;
 	req.setHmdTracker.predictionTime = CalCtx.predictionTime;
 	req.setHmdTracker.enableAngularVelocity = CalCtx.enableAngularVelocity;
@@ -524,6 +523,8 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.calibrationScale = CalCtx.calibratedScale;
 	req.setHmdTracker.hmdScale = CalCtx.hmdScale;
 	req.setHmdTracker.followSlamHmd = CalCtx.followSlamHmd;
+	// Calibration reads the tracker back through SteamVR.
+	req.setHmdTracker.hideHeadTracker = CalCtx.hideHeadTracker && CalCtx.state == CalibrationState::None;
 	Driver.SendBlocking(req);
 }
 
@@ -732,7 +733,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
-static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
+static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID, double time)
 {
 	ctx.targetID = targetID;
 	ctx.targetTrackingSystem = GetDeviceTrackingSystem(targetID);
@@ -746,6 +747,9 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	ResetAndDisableOffsets(targetID);
 	SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, false);
 
+	ctx.sequenceStart = time;
+	ctx.sequenceSteps = ctx.SequenceStepCount();
+	ctx.sequenceStep = 0;
 	ctx.state = CalibrationState::Sampling;
 	ctx.wantedUpdateInterval = 0.0;
 	ctx.Log("Starting calibration...\n");
@@ -787,32 +791,35 @@ void CancelCalibration()
 	AbortAndRestoreProfile(ctx);
 }
 
+static void UpdateSequenceStep(CalibrationContext &ctx, double time)
+{
+	if (ctx.state != CalibrationState::Sampling)
+	{
+		ctx.sequenceStep = 0;
+		return;
+	}
+
+	int steps = ctx.sequenceSteps > 0 ? ctx.sequenceSteps : ctx.SequenceStepCount();
+	int step = (int)((time - ctx.sequenceStart) / CalibrationContext::StepSeconds);
+	ctx.sequenceStep = step < 0 ? 0 : (step > steps - 1 ? steps - 1 : step);
+}
+
 static void UpdateCalibrationSounds(CalibrationContext &ctx)
 {
 	static const char *directions[] = { "look_left", "look_center", "look_right", "look_center", "look_up", "look_center", "look_down", "look_center" };
 	static CalibrationState lastState = CalibrationState::None;
 	static int lastStep = -1;
-	static size_t stepStart = 0;
-	static bool nextPlayed = false;
+
+	const int cycle = (int)(sizeof directions / sizeof directions[0]);
+	static_assert(cycle == CalibrationContext::SequenceCycle, "voice cues and wizard steps must line up");
 
 	if (ctx.state == CalibrationState::Sampling)
 	{
-		size_t target = ctx.SampleCount();
-		size_t perStep = target > 0 ? target / 8 : 1;
-		int step = target > 0 ? (int)(collectedSamples.size() * 8 / target) : 0;
-		if (step > 7) step = 7;
-		if (step != lastStep)
+		if (ctx.sequenceStep != lastStep)
 		{
 			sound::Stop();
-			sound::Play(directions[step]);
-			lastStep = step;
-			stepStart = collectedSamples.size();
-			nextPlayed = false;
-		}
-		else if (!nextPlayed && collectedSamples.size() + 8 >= stepStart + perStep)
-		{
-			sound::Play("next");
-			nextPlayed = true;
+			sound::Play(directions[ctx.sequenceStep % cycle]);
+			lastStep = ctx.sequenceStep;
 		}
 	}
 	else
@@ -839,6 +846,7 @@ void CalibrationTick(double time)
 
 	ctx.timeLastTick = time;
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, ctx.devicePoses, vr::k_unMaxTrackedDeviceCount);
+	UpdateSequenceStep(ctx, time);
 	UpdateCalibrationSounds(ctx);
 
 	if (ctx.state == CalibrationState::None)
@@ -900,7 +908,7 @@ void CalibrationTick(double time)
 		if (Detection.candidates.size() == 1)
 		{
 			ctx.targetID = Detection.candidates[0];
-			BeginSamplingPhase(ctx, Detection.candidates[0]);
+			BeginSamplingPhase(ctx, Detection.candidates[0], time);
 			return;
 		}
 
@@ -979,7 +987,7 @@ void CalibrationTick(double time)
 
 		uint32_t targetID = Detection.candidates[bestIdx];
 		Detection.Clear();
-		BeginSamplingPhase(ctx, targetID);
+		BeginSamplingPhase(ctx, targetID, time);
 		return;
 	}
 
@@ -992,11 +1000,21 @@ void CalibrationTick(double time)
 	auto &samples = collectedSamples;
 	samples.push_back(sample);
 
-	CalCtx.Progress(samples.size(), CalCtx.SampleCount());
+	double elapsed = time - ctx.sequenceStart;
+	double total = ctx.SequenceSeconds();
+	CalCtx.Progress((int)(elapsed * 1000.0), (int)(total * 1000.0));
 
-	if (samples.size() >= CalCtx.SampleCount())
+	if (elapsed >= total)
 	{
 		CalCtx.Log("\n");
+
+		if (samples.size() < 40)
+		{
+			CalCtx.Log("Not enough samples were collected, aborting calibration! Previous calibration restored.\n");
+			AbortAndRestoreProfile(ctx);
+			return;
+		}
+
 
 		double axisVariance = SecondAxisVariance(samples);
 		if (axisVariance < AxisVarianceThreshold)

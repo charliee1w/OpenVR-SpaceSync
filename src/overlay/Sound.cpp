@@ -29,7 +29,8 @@ namespace sound
 
 		std::mutex mutex;
 		std::condition_variable wake;
-		std::deque<std::string> queue;
+		std::deque<std::pair<std::string, uint64_t>> queue;
+		uint64_t generation = 0;
 		std::map<std::string, std::vector<uint8_t>> cache;
 		std::thread worker;
 		bool running = false;
@@ -121,17 +122,30 @@ namespace sound
 			for (;;)
 			{
 				std::string name;
+				uint64_t gen = 0;
 				{
 					std::unique_lock<std::mutex> lock(mutex);
 					wake.wait(lock, [] { return !running || !queue.empty(); });
 					if (!running)
 						return;
-					name = queue.front();
+					name = queue.front().first;
+					gen = queue.front().second;
 					queue.pop_front();
 				}
+
 				const std::vector<uint8_t>* wav = Load(name);
-				if (wav)
-					PlaySoundA(reinterpret_cast<LPCSTR>(wav->data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+				if (!wav)
+					continue;
+
+				// Stop() between the pop above and here would otherwise let a superseded cue play
+				// and push everything after it a step out of sync.
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					if (!running || gen != generation)
+						continue;
+				}
+
+				PlaySoundA(reinterpret_cast<LPCSTR>(wav->data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
 			}
 		}
 	}
@@ -167,7 +181,7 @@ namespace sound
 			std::lock_guard<std::mutex> lock(mutex);
 			if (!running)
 				return;
-			queue.push_back(name);
+			queue.push_back({ name, generation });
 		}
 		wake.notify_one();
 	}
@@ -176,6 +190,7 @@ namespace sound
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		queue.clear();
+		generation++;
 	}
 
 	void Stop()

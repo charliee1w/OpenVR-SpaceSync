@@ -49,11 +49,11 @@ struct CalibrationContext
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
-	bool enableNative = false;
 	bool fallbackToSlam = true;
 	bool enableAngularVelocity = false;
 	bool continuousSync = true;
 	bool followSlamHmd = false;
+	bool hideHeadTracker = false;
 	float predictionTime = 1.0f;
 	float uiScale = 1.25f;            // UI content scale
 
@@ -105,19 +105,30 @@ struct CalibrationContext
 		continuousSync = true;
 	}
 
-	size_t SampleCount()
+	// The look-around sequence drives both the wizard and the voice cues, one second per step.
+	static const int SequenceCycle = 8;
+	static constexpr double StepSeconds = 1.0;
+
+	double sequenceStart = 0.0;
+	int sequenceStep = 0;
+	int sequenceSteps = 0;
+
+	int SequencePasses() const
 	{
 		switch (calibrationSpeed)
 		{
 		case FAST:
-			return 100;
+			return 1;
 		case SLOW:
-			return 250;
+			return 2;
 		case VERY_SLOW:
-			return 500;
+			return 3;
 		}
-		return 100;
+		return 1;
 	}
+
+	int SequenceStepCount() const { return SequenceCycle * SequencePasses(); }
+	double SequenceSeconds() const { return SequenceStepCount() * StepSeconds; }
 
 	struct Message
 	{

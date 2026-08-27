@@ -265,7 +265,7 @@ int main(int argc, char** argv)
                             CalCtx.Clear();
                             std::thread([]() {
                                 std::this_thread::sleep_for(3000ms);
-                                CalCtx.notificationId = ShowNotification("Tracking lost - Currently recalibrating, please follow the calibration instructions.\n\nLook left, Look center, Look right, Look center, Look up, Look center.");
+                                CalCtx.notificationId = ShowNotification("Tracking lost - Currently recalibrating, please follow the calibration instructions.\n\nLook left, center, right, center, up, center, down, center - repeated depending on your calibration speed.");
                                 StartCalibration();
                             }).detach();
                         }

@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 11;
+	const uint32_t Version = 12;
 
 	enum RequestType
 	{
@@ -74,7 +74,6 @@ namespace protocol
 		uint32_t hmdID;
 		uint32_t trackerID;
 		bool enabled;
-		bool native;
 		bool slamFallback;
 		bool enableAngularVelocity;
 		float predictionTime;
@@ -87,6 +86,8 @@ namespace protocol
 		double hmdScale;
 		// Follow SLAM HMD: headset keeps its SLAM pose, lighthouse devices (incl. head tracker) follow it.
 		bool followSlamHmd;
+		// Follow mode only.
+		bool hideHeadTracker;
 	};
 
 	struct SetSlamSync
