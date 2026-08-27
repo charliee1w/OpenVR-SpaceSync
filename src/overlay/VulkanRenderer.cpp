@@ -282,7 +282,7 @@ auto VulkanRenderer::SetupWindow(Vulkan_Window* window, VkSurfaceKHR surface, ui
     // All compatible formats can be found at https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats
     VkSurfaceFormatKHR surface_format =
     {
-        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
         .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR // make sure colour space is non linear otherwise it will not render on AMD GPUs
     };
 
@@ -779,7 +779,7 @@ auto VulkanRenderer::SubmitOverlay(VrOverlay*& overlay) -> void
     {
         .handle = (void*)&vulkanTexure,
         .eType = vr::TextureType_Vulkan,
-        .eColorSpace = vr::ColorSpace_Auto,
+        .eColorSpace = vr::ColorSpace_Gamma,
     };
 
     try {

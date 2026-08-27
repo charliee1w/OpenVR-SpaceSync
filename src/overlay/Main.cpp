@@ -335,21 +335,19 @@ int main(int argc, char** argv)
             g_vulkanRenderer->Present(g_imGuiWindow->WindowData());
         }
 
-        const uint64_t now = SDL_GetTicksNS();
         const uint64_t target_time_ns = static_cast<uint64_t>(1'000'000'000.0 / g_hmd_refresh_rate);
-        const uint64_t frame_duration_ns = now - g_last_frame_time;
+        uint64_t elapsed_ns = SDL_GetTicksNS() - g_last_frame_time;
 
-        if (frame_duration_ns < target_time_ns)
+        if (elapsed_ns < target_time_ns)
         {
-            const uint32_t timeout_ms = static_cast<uint32_t>((target_time_ns - frame_duration_ns) / 1'000'000);
-            vr::VROverlay()->WaitFrameSync(timeout_ms);
+            vr::VROverlay()->WaitFrameSync(static_cast<uint32_t>((target_time_ns - elapsed_ns) / 1'000'000));
 
-            const uint64_t remaining_ns = target_time_ns - (now - g_last_frame_time);
-            if (remaining_ns > 0)
-                SDL_DelayPrecise(remaining_ns);
+            elapsed_ns = SDL_GetTicksNS() - g_last_frame_time;
+            if (elapsed_ns < target_time_ns)
+                SDL_DelayPrecise(target_time_ns - elapsed_ns);
         }
 
-        g_last_frame_time = now;
+        g_last_frame_time = SDL_GetTicksNS();
     }
 
     SaveProfile(CalCtx);

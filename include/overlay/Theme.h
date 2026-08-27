@@ -71,6 +71,7 @@ namespace ui
 	ImU32 Col(unsigned rgb, float alpha = 1.0f);
 	ImVec4 ColV(unsigned rgb, float alpha = 1.0f);
 
+	float FontPx(float designSize);
 	void PushFont(ImFont* font, float designSize);
 	void PopFont();
 	ImVec2 TextSize(ImFont* font, float designSize, const char* text, float wrapDesignWidth = 0.0f);

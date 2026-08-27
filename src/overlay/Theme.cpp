@@ -61,7 +61,7 @@ namespace ui
 		cfg.OversampleH = 2;
 		cfg.OversampleV = 2;
 
-		const float base = px(13.0f);
+		const float base = FontPx(13.0f);
 		F.regular = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope400_compressed_data, (int)Manrope400_compressed_size, base, &cfg);
 		F.medium = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope500_compressed_data, (int)Manrope500_compressed_size, base, &cfg);
 		F.semibold = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope600_compressed_data, (int)Manrope600_compressed_size, base, &cfg);
@@ -106,9 +106,16 @@ namespace ui
 		c[ImGuiCol_NavCursor] = ColV(P.accent, 0.0f);
 	}
 
+	float FontPx(float designSize)
+	{
+		float v = px(designSize);
+		float r = std::floor(v + 0.5f);
+		return r < 1.0f ? 1.0f : r;
+	}
+
 	void PushFont(ImFont* font, float designSize)
 	{
-		ImGui::PushFont(font ? font : F.regular, px(designSize));
+		ImGui::PushFont(font ? font : F.regular, FontPx(designSize));
 	}
 
 	void PopFont()
@@ -126,6 +133,8 @@ namespace ui
 
 	void Text(ImFont* font, float designSize, unsigned rgb, const char* text)
 	{
+		ImVec2 c = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(ImVec2(std::floor(c.x + 0.5f), std::floor(c.y + 0.5f)));
 		PushFont(font, designSize);
 		ImGui::PushStyleColor(ImGuiCol_Text, ColV(rgb));
 		ImGui::TextUnformatted(text);
@@ -135,6 +144,8 @@ namespace ui
 
 	void TextWrapped(ImFont* font, float designSize, unsigned rgb, float wrapDesignWidth, const char* text)
 	{
+		ImVec2 c = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(ImVec2(std::floor(c.x + 0.5f), std::floor(c.y + 0.5f)));
 		PushFont(font, designSize);
 		ImGui::PushStyleColor(ImGuiCol_Text, ColV(rgb));
 		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + px(wrapDesignWidth));
@@ -146,14 +157,15 @@ namespace ui
 
 	void DrawText(ImDrawList* dl, ImFont* font, float designSize, ImVec2 pos, unsigned rgb, const char* text)
 	{
-		dl->AddText(font ? font : F.regular, px(designSize), pos, Col(rgb), text);
+		dl->AddText(font ? font : F.regular, FontPx(designSize), ImVec2(std::floor(pos.x + 0.5f), std::floor(pos.y + 0.5f)), Col(rgb), text);
 	}
 
 	void DrawTextCentered(ImDrawList* dl, ImFont* font, float designSize, ImVec2 center, unsigned rgb, const char* text)
 	{
 		ImFont* f = font ? font : F.regular;
-		ImVec2 size = f->CalcTextSizeA(px(designSize), FLT_MAX, 0.0f, text);
-		dl->AddText(f, px(designSize), ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f), Col(rgb), text);
+		const float fs = FontPx(designSize);
+		ImVec2 size = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, text);
+		dl->AddText(f, fs, ImVec2(std::floor(center.x - size.x * 0.5f + 0.5f), std::floor(center.y - size.y * 0.5f + 0.5f)), Col(rgb), text);
 	}
 
 	void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float designSize, ImU32 col, float designThickness)

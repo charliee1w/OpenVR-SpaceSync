@@ -82,16 +82,15 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
     (void)io;
 
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_IsSRGB; // NOTE: ImGuiConfigFlags_IsSRGB is not used by ImGui, used to communicate state.
 
     io.IniFilename = nullptr;
     io.DisplaySize = ImVec2(static_cast<float>(width_), static_cast<float>(height_));
 
-    ui::Init(ui_scale_, (io.ConfigFlags & ImGuiConfigFlags_IsSRGB) != 0);
+    ui::Init(ui_scale_, false);
 
     VkSurfaceFormatKHR render_format =
     {
-        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
         .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
     };
 

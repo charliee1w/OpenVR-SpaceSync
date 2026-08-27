@@ -70,6 +70,9 @@ private:
 	double editStep_ = 0.1;
 	bool confirmRemove_ = false;
 	bool wizardOpen_ = false;
-	float contentTop_ = 0.0f;      // y where the content area starts
-	float contentHeight_ = 0.0f;   // content area height in px
+	float scrollTarget_ = 0.0f;
+	float scrollApplied_ = 0.0f;
+	int scrollTab_ = -1;
+	float contentTop_ = 0.0f;
+	float contentHeight_ = 0.0f;
 };

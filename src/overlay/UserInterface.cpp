@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <imgui.h>
 
 using namespace ui;
@@ -246,8 +247,29 @@ UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 
 		ImGui::SetCursorPos(ImVec2(0.0f, y));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24.0f), px(24.0f)));
-		if (ImGui::BeginChild("content", ImVec2(W, contentHeight_), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollWithMouse * 0))
+		if (ImGui::BeginChild("content", ImVec2(W, contentHeight_), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollWithMouse))
 		{
+			// ImGui jumps the wheel in whole steps. Keep our own target and ease toward it so the
+			// content glides instead of snapping.
+			const float current = ImGui::GetScrollY();
+
+			// Dragging the scrollbar, the keyboard or a content resize all move the scroll behind our
+			// back. Adopt that as the new target, otherwise the easing drags it back every frame.
+			if (scrollTab_ != (int)tab_ || std::abs(current - scrollApplied_) > 0.5f)
+			{
+				scrollTab_ = (int)tab_;
+				scrollTarget_ = current;
+			}
+
+			const float maxScroll = ImGui::GetScrollMaxY();
+			if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && io.MouseWheel != 0.0f)
+				scrollTarget_ -= io.MouseWheel * px(110.0f);
+			scrollTarget_ = std::min(maxScroll, std::max(0.0f, scrollTarget_));
+			const float blend = 1.0f - std::exp(-io.DeltaTime / 0.055f);
+			const float next = current + (scrollTarget_ - current) * blend;
+			scrollApplied_ = std::abs(scrollTarget_ - next) < 0.5f ? scrollTarget_ : next;
+			ImGui::SetScrollY(scrollApplied_);
+
 			const float inset = px(PageInset());
 			if (inset > 0.0f)
 				ImGui::Indent(inset);
