@@ -712,6 +712,11 @@ private:
 		if (span < 0.005 || span > 0.2) return;
 		double ang = quaternionAngleRad(rotation * quaternionConjugate(old.rotation)) / span;
 		double lin = vecNorm(vecSub(position, old.position)) / span;
+		if (ang > 20.0 || lin > 6.0)
+		{
+			ring.clear();
+			return;
+		}
 		series.add(0.5 * (t + old.time), ang, lin);
 	}
 
@@ -785,51 +790,211 @@ private:
 
 struct MountRefiner
 {
-	double forgetSeconds = 90.0;
-	double minCalmSeconds = 15.0;
-	double fullFractionSeconds = 45.0;
-	double solveInterval = 2.0;
-	double fraction = 0.3;
+	double blockSeconds = 60.0;
+	double obsMin = 0.15;
+	double obsScaleMin = 0.5;
 	double ridge = 0.05;
-	double spreadRidge = 0.09;
+	double spreadRidge = 0.25;
 	double yawResetAngle = 5.0 * POSE_PI / 180.0;
-	double maxRotation = 10.0 * POSE_PI / 180.0;
-	double maxTranslation = 0.10;
-	double maxScale = 0.02;
+	double maxRotation = 3.0 * POSE_PI / 180.0;
+	double maxTranslation = 0.02;
+	double maxScale = 0.01;
+	double stepRotation = 0.5 * POSE_PI / 180.0;
+	double stepTranslation = 0.01;
+	double stepScale = 0.005;
+	double minImprovementRatio = 0.8;
+	double minImprovementRatioRotation = 0.7;
+	double minImprovementTranslation = 0.001;
+	double minImprovementRotation = 0.3 * POSE_PI / 180.0;
+	double suspectTranslation = 0.03;
+	double suspectRotation = 3.0 * POSE_PI / 180.0;
 	bool scaleEnabled = true;
-	double obsMin = 0.05;
-	double obsScaleMin = 0.25;
 
+	struct Block
+	{
+		double weight = 0.0;
+		Mat3 sumR = Mat3::zero();
+		vr::HmdVector3d_t sumM = { 0, 0, 0 };
+		vr::HmdVector3d_t sumRtM = { 0, 0, 0 };
+		vr::HmdVector3d_t sumE = { 0, 0, 0 };
+		vr::HmdVector3d_t sumRtE = { 0, 0, 0 };
+		vr::HmdVector3d_t sumX = { 0, 0, 0 };
+		vr::HmdVector3d_t sumRtX = { 0, 0, 0 };
+		vr::HmdVector3d_t sumYX = { 0, 0, 0 };
+		vr::HmdVector3d_t sumRtYX = { 0, 0, 0 };
+		double sumXX = 0.0;
+		double sumYXYX = 0.0;
+		double sumXE = 0.0;
+		double sumYXE = 0.0;
+		double sumEE = 0.0;
+		double sumMM = 0.0;
+
+		void clear()
+		{
+			weight = 0.0;
+			sumR = Mat3::zero();
+			sumM = sumRtM = sumE = sumRtE = sumX = sumRtX = sumYX = sumRtYX = { 0, 0, 0 };
+			sumXX = sumYXYX = sumXE = sumYXE = sumEE = sumMM = 0.0;
+		}
+
+		void add(const Mat3& R, const vr::HmdVector3d_t& m, const vr::HmdVector3d_t& e, const vr::HmdVector3d_t& x, const vr::HmdVector3d_t& yx, double w)
+		{
+			weight += w;
+			sumR.addScaled(R, w);
+			sumM = vecAdd(sumM, vecScale(m, w));
+			sumRtM = vecAdd(sumRtM, vecScale(R.mulTransposed(m), w));
+			sumE = vecAdd(sumE, vecScale(e, w));
+			sumRtE = vecAdd(sumRtE, vecScale(R.mulTransposed(e), w));
+			sumX = vecAdd(sumX, vecScale(x, w));
+			sumRtX = vecAdd(sumRtX, vecScale(R.mulTransposed(x), w));
+			sumYX = vecAdd(sumYX, vecScale(yx, w));
+			sumRtYX = vecAdd(sumRtYX, vecScale(R.mulTransposed(yx), w));
+			sumXX += w * vecDot(x, x);
+			sumYXYX += w * vecDot(yx, yx);
+			sumXE += w * vecDot(x, e);
+			sumYXE += w * vecDot(yx, e);
+			sumEE += w * vecDot(e, e);
+			sumMM += w * vecDot(m, m);
+		}
+
+		void shift(double yawDelta, const vr::HmdVector3d_t& dc)
+		{
+			if (weight <= 0.0) return;
+			vr::HmdVector3d_t up = { 0, 1, 0 };
+			sumEE += 2.0 * vecDot(dc, sumE) + 2.0 * yawDelta * sumYXE + weight * vecDot(dc, dc) + 2.0 * yawDelta * vecDot(dc, sumYX) + yawDelta * yawDelta * sumYXYX;
+			sumMM += 2.0 * yawDelta * sumM.v[1] + weight * yawDelta * yawDelta;
+			sumXE += vecDot(sumX, dc);
+			sumYXE += vecDot(sumYX, dc) + yawDelta * sumYXYX;
+			sumRtE = vecAdd(sumRtE, vecAdd(sumR.mulTransposed(dc), vecScale(sumRtYX, yawDelta)));
+			sumE = vecAdd(sumE, vecAdd(vecScale(dc, weight), vecScale(sumYX, yawDelta)));
+			sumRtM = vecAdd(sumRtM, vecScale(sumR.mulTransposed(up), yawDelta));
+			sumM = vecAdd(sumM, vecScale(up, yawDelta * weight));
+		}
+
+		double translationCost(const vr::HmdVector3d_t& delta, double kappa) const
+		{
+			double N = weight;
+			if (N <= 0.0) return 0.0;
+			double rr = sumEE - 2.0 * vecDot(delta, sumRtE) - 2.0 * kappa * sumXE + N * vecDot(delta, delta) + 2.0 * kappa * vecDot(delta, sumRtX) + kappa * kappa * sumXX;
+			vr::HmdVector3d_t b1 = vecSub(vecSub(sumE, sumR.mul(delta)), vecScale(sumX, kappa));
+			double b2 = sumYXE - vecDot(sumRtYX, delta);
+			double M[16] = {
+				N, 0, 0, sumYX.v[0],
+				0, N, 0, sumYX.v[1],
+				0, 0, N, sumYX.v[2],
+				sumYX.v[0], sumYX.v[1], sumYX.v[2], sumYXYX + 0.01 * N
+			};
+			double b[4] = { b1.v[0], b1.v[1], b1.v[2], b2 };
+			double v[4];
+			if (!solveLinearSystem(4, M, b, v))
+				return rr;
+			double cost = rr - (b1.v[0] * v[0] + b1.v[1] * v[1] + b1.v[2] * v[2] + b2 * v[3]);
+			return cost < 0.0 ? 0.0 : cost;
+		}
+
+		double rotationCost(const vr::HmdVector3d_t& eps) const
+		{
+			double N = weight;
+			if (N <= 0.0) return 0.0;
+			vr::HmdVector3d_t a = sumR.mulTransposed({ 0, 1, 0 });
+			double qq = sumMM - 2.0 * vecDot(eps, sumRtM) + N * vecDot(eps, eps);
+			double s = sumM.v[1] - vecDot(a, eps);
+			double cost = qq - s * s / N;
+			return cost < 0.0 ? 0.0 : cost;
+		}
+
+		bool solveRotation(vr::HmdVector3d_t& eps, double obs[3], double ridge) const
+		{
+			double N = weight;
+			vr::HmdVector3d_t a = sumR.mulTransposed({ 0, 1, 0 });
+			double A[9], b[3], x[3];
+			for (int i = 0; i < 3; i++)
+			{
+				obs[i] = 1.0 - a.v[i] * a.v[i] / (N * N);
+				for (int j = 0; j < 3; j++)
+					A[i * 3 + j] = (i == j ? N + ridge * N : 0.0) - a.v[i] * a.v[j] / N;
+				b[i] = sumRtM.v[i] - a.v[i] * sumM.v[1] / N;
+			}
+			if (!solveLinearSystem(3, A, b, x)) return false;
+			eps = { x[0], x[1], x[2] };
+			return true;
+		}
+
+		bool solveTranslation(vr::HmdVector3d_t& delta, double& kappa, double obs[3], double& obsScale, double ridge, double spreadRidge) const
+		{
+			double N = weight;
+			for (int i = 0; i < 3; i++)
+			{
+				double col = 0.0;
+				for (int k = 0; k < 3; k++) col += sumR.m[k][i] * sumR.m[k][i];
+				obs[i] = 1.0 - col / (N * N);
+			}
+			obsScale = (sumXX - vecDot(sumX, sumX) / N) / N;
+
+			double B[25], c[5], v[5], Cm[15];
+			for (int i = 0; i < 3; i++)
+			{
+				for (int j = 0; j < 3; j++) Cm[i * 5 + j] = sumR.m[i][j];
+				Cm[i * 5 + 3] = sumX.v[i];
+				Cm[i * 5 + 4] = sumYX.v[i];
+			}
+			for (int i = 0; i < 25; i++) B[i] = 0.0;
+			for (int i = 0; i < 3; i++)
+			{
+				B[i * 5 + i] = N;
+				B[i * 5 + 3] = B[3 * 5 + i] = sumRtX.v[i];
+				B[i * 5 + 4] = B[4 * 5 + i] = sumRtYX.v[i];
+			}
+			B[3 * 5 + 3] = sumXX;
+			B[4 * 5 + 4] = sumYXYX;
+			for (int i = 0; i < 5; i++)
+				for (int j = 0; j < 5; j++)
+				{
+					double dotc = 0.0;
+					for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * Cm[k * 5 + j];
+					B[i * 5 + j] -= dotc / N;
+				}
+			for (int i = 0; i < 3; i++) B[i * 5 + i] += ridge * N;
+			B[3 * 5 + 3] += spreadRidge * N;
+			B[4 * 5 + 4] += spreadRidge * N;
+			double rhs[5] = { sumRtE.v[0], sumRtE.v[1], sumRtE.v[2], sumXE, sumYXE };
+			for (int i = 0; i < 5; i++)
+			{
+				double dotc = 0.0;
+				for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * sumE.v[k];
+				c[i] = rhs[i] - dotc / N;
+			}
+			if (!solveLinearSystem(5, B, c, v)) return false;
+			delta = { v[0], v[1], v[2] };
+			kappa = v[3];
+			return true;
+		}
+	};
+
+	Block current;
+	Block previous;
 	bool started = false;
 	double yawReference = 0.0;
-	double weight = 0.0;
-	double sinceSolve = 0.0;
-	Mat3 sumR = Mat3::zero();
-	vr::HmdVector3d_t sumM = { 0, 0, 0 };
-	vr::HmdVector3d_t sumRtM = { 0, 0, 0 };
-	vr::HmdVector3d_t sumE = { 0, 0, 0 };
-	vr::HmdVector3d_t sumRtE = { 0, 0, 0 };
-	vr::HmdVector3d_t sumX = { 0, 0, 0 };
-	vr::HmdVector3d_t sumRtX = { 0, 0, 0 };
-	vr::HmdVector3d_t sumYX = { 0, 0, 0 };
-	vr::HmdVector3d_t sumRtYX = { 0, 0, 0 };
-	double sumXX = 0.0;
-	double sumYXYX = 0.0;
-	double sumXE = 0.0;
-	double sumYXE = 0.0;
 
-	vr::HmdVector3d_t solvedRotation = { 0, 0, 0 };
-	vr::HmdVector3d_t solvedTranslation = { 0, 0, 0 };
-	double solvedScale = 0.0;
-	double solvedYaw = 0.0;
 	vr::HmdVector3d_t rotation = { 0, 0, 0 };
 	vr::HmdVector3d_t translation = { 0, 0, 0 };
 	double scale = 0.0;
-	uint32_t solves = 0;
-	bool solvedValid = false;
+	vr::HmdVector3d_t solvedRotation = { 0, 0, 0 };
+	vr::HmdVector3d_t solvedTranslation = { 0, 0, 0 };
+	double solvedScale = 0.0;
 	double obsRotation[3] = { 0, 0, 0 };
 	double obsTranslation[3] = { 0, 0, 0 };
 	double obsScale = 0.0;
+	double lastRmsBefore = 0.0;
+	double lastRmsAfter = 0.0;
+	double lastRotBefore = 0.0;
+	double lastRotAfter = 0.0;
+	bool lastAcceptedTranslation = false;
+	bool lastAcceptedRotation = false;
+	bool lastHadReference = false;
+	uint32_t solves = 0;
+	uint32_t applied = 0;
+	bool suspected = false;
 
 	struct Delta
 	{
@@ -842,25 +1007,22 @@ struct MountRefiner
 	{
 		started = false;
 		clearSums();
-		solvedRotation = { 0, 0, 0 };
-		solvedTranslation = { 0, 0, 0 };
-		solvedScale = 0.0;
-		solvedYaw = 0.0;
 		rotation = { 0, 0, 0 };
 		translation = { 0, 0, 0 };
 		scale = 0.0;
-		solvedValid = false;
+		solvedRotation = { 0, 0, 0 };
+		solvedTranslation = { 0, 0, 0 };
+		solvedScale = 0.0;
+		suspected = false;
 	}
 
 	void clearSums()
 	{
-		weight = 0.0;
-		sinceSolve = 0.0;
-		sumR = Mat3::zero();
-		sumM = sumRtM = sumE = sumRtE = sumX = sumRtX = sumYX = sumRtYX = { 0, 0, 0 };
-		sumXX = sumYXYX = sumXE = sumYXE = 0.0;
+		current.clear();
+		previous.clear();
 	}
 
+	double weight() const { return current.weight; }
 	double rotationAngle() const { return vecNorm(rotation); }
 	double translationDistance() const { return vecNorm(translation); }
 
@@ -878,20 +1040,15 @@ struct MountRefiner
 
 	void shift(double yawDelta, const vr::HmdVector3d_t& translationDeltaC)
 	{
-		if (!started || weight <= 0.0) return;
+		if (!started) return;
 		vr::HmdVector3d_t dc = quaternionRotateVector(quaternionConjugate(quaternionFromYaw(yawReference)), translationDeltaC);
-		vr::HmdVector3d_t up = { 0, 1, 0 };
-		sumE = vecAdd(sumE, vecAdd(vecScale(dc, weight), vecScale(sumYX, yawDelta)));
-		sumRtE = vecAdd(sumRtE, vecAdd(sumR.mulTransposed(dc), vecScale(sumRtYX, yawDelta)));
-		sumXE += vecDot(sumX, dc);
-		sumYXE += vecDot(sumYX, dc) + yawDelta * sumYXYX;
-		sumM = vecAdd(sumM, vecScale(up, yawDelta * weight));
-		sumRtM = vecAdd(sumRtM, vecScale(sumR.mulTransposed(up), yawDelta));
+		current.shift(yawDelta, dc);
+		previous.shift(yawDelta, dc);
 	}
 
 	void add(const vr::HmdQuaternion_t& headRotationBase, const vr::HmdVector3d_t& headPositionBase,
 		const vr::HmdQuaternion_t& rawRotation, const vr::HmdVector3d_t& rawPosition,
-		double estimatorYaw, double baseScale, double w, double dt)
+		double estimatorYaw, double baseScale, double w)
 	{
 		if (w <= 0.0) return;
 		if (!started || std::fabs(wrapRad(estimatorYaw - yawReference)) > yawResetAngle)
@@ -907,137 +1064,86 @@ struct MountRefiner
 		vr::HmdVector3d_t e = vecSub(quaternionRotateVector(invRef, headPositionBase), x);
 		vr::HmdVector3d_t yx = { x.v[2], 0.0, -x.v[0] };
 		Mat3 R = Mat3::fromQuaternion(rawRotation);
-
-		double f = 1.0 - w / forgetSeconds;
-		if (f < 0.0) f = 0.0;
-		sumR.scale(f);
-		sumM = vecScale(sumM, f); sumRtM = vecScale(sumRtM, f);
-		sumE = vecScale(sumE, f); sumRtE = vecScale(sumRtE, f);
-		sumX = vecScale(sumX, f); sumRtX = vecScale(sumRtX, f);
-		sumYX = vecScale(sumYX, f); sumRtYX = vecScale(sumRtYX, f);
-		sumXX *= f; sumYXYX *= f; sumXE *= f; sumYXE *= f;
-		weight = weight * f + w;
-
-		sumR.addScaled(R, w);
-		sumM = vecAdd(sumM, vecScale(m, w));
-		sumRtM = vecAdd(sumRtM, vecScale(R.mulTransposed(m), w));
-		sumE = vecAdd(sumE, vecScale(e, w));
-		sumRtE = vecAdd(sumRtE, vecScale(R.mulTransposed(e), w));
-		sumX = vecAdd(sumX, vecScale(x, w));
-		sumRtX = vecAdd(sumRtX, vecScale(R.mulTransposed(x), w));
-		sumYX = vecAdd(sumYX, vecScale(yx, w));
-		sumRtYX = vecAdd(sumRtYX, vecScale(R.mulTransposed(yx), w));
-		sumXX += w * vecDot(x, x);
-		sumYXYX += w * vecDot(yx, yx);
-		sumXE += w * vecDot(x, e);
-		sumYXE += w * vecDot(yx, e);
-		sinceSolve += dt;
+		current.add(R, m, e, x, yx, w);
 	}
 
-	bool due() const { return weight >= minCalmSeconds && sinceSolve >= solveInterval; }
-
-	bool solve()
+	bool evaluate(Delta& out)
 	{
-		sinceSolve = 0.0;
-		if (weight < minCalmSeconds) return false;
-		double N = weight;
+		out = Delta();
+		if (current.weight < blockSeconds) return false;
 
-		vr::HmdVector3d_t a = sumR.mulTransposed({ 0, 1, 0 });
-		for (int i = 0; i < 3; i++)
-		{
-			obsRotation[i] = 1.0 - a.v[i] * a.v[i] / (N * N);
-			double col = 0.0;
-			for (int k = 0; k < 3; k++) col += sumR.m[k][i] * sumR.m[k][i];
-			obsTranslation[i] = 1.0 - col / (N * N);
-		}
-		obsScale = (sumXX - vecDot(sumX, sumX) / N) / N;
-		double A[9], b[3], eps[3];
-		for (int i = 0; i < 3; i++)
-		{
-			for (int j = 0; j < 3; j++)
-				A[i * 3 + j] = (i == j ? N + ridge * N : 0.0) - a.v[i] * a.v[j] / N;
-			b[i] = sumRtM.v[i] - a.v[i] * sumM.v[1] / N;
-		}
-		if (!solveLinearSystem(3, A, b, eps)) return false;
-
-		double B[25], c[5], v[5];
-		double Cm[15];
-		for (int i = 0; i < 3; i++)
-		{
-			for (int j = 0; j < 3; j++) Cm[i * 5 + j] = sumR.m[i][j];
-			Cm[i * 5 + 3] = sumX.v[i];
-			Cm[i * 5 + 4] = sumYX.v[i];
-		}
-		for (int i = 0; i < 25; i++) B[i] = 0.0;
-		for (int i = 0; i < 3; i++)
-		{
-			B[i * 5 + i] = N;
-			B[i * 5 + 3] = B[3 * 5 + i] = sumRtX.v[i];
-			B[i * 5 + 4] = B[4 * 5 + i] = sumRtYX.v[i];
-		}
-		B[3 * 5 + 3] = sumXX;
-		B[4 * 5 + 4] = sumYXYX;
-		for (int i = 0; i < 5; i++)
-			for (int j = 0; j < 5; j++)
-			{
-				double dotc = 0.0;
-				for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * Cm[k * 5 + j];
-				B[i * 5 + j] -= dotc / N;
-			}
-		for (int i = 0; i < 3; i++) B[i * 5 + i] += ridge * N;
-		B[3 * 5 + 3] += spreadRidge * N + (scaleEnabled ? 0.0 : 1e6 * N);
-		B[4 * 5 + 4] += spreadRidge * N;
-		double rhs[5] = { sumRtE.v[0], sumRtE.v[1], sumRtE.v[2], sumXE, sumYXE };
-		for (int i = 0; i < 5; i++)
-		{
-			double dotc = 0.0;
-			for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * sumE.v[k];
-			c[i] = rhs[i] - dotc / N;
-		}
-		if (!solveLinearSystem(5, B, c, v)) return false;
-
-		vr::HmdVector3d_t epsV = { eps[0], eps[1], eps[2] };
-		vr::HmdVector3d_t delV = { v[0], v[1], v[2] };
-		double epsN = vecNorm(epsV), delN = vecNorm(delV);
-		if (epsN > maxRotation) epsV = vecScale(epsV, maxRotation / epsN);
-		if (delN > maxTranslation) delV = vecScale(delV, maxTranslation / delN);
-		double kap = v[3];
-		if (kap > maxScale) kap = maxScale;
-		if (kap < -maxScale) kap = -maxScale;
-
-		solvedRotation = epsV;
-		solvedTranslation = delV;
-		solvedScale = scaleEnabled ? kap : 0.0;
-		solvedYaw = v[4];
-		solvedValid = true;
+		vr::HmdVector3d_t epsSol = { 0, 0, 0 }, delSol = { 0, 0, 0 };
+		double kapSol = 0.0;
+		bool okR = current.solveRotation(epsSol, obsRotation, ridge);
+		bool okT = current.solveTranslation(delSol, kapSol, obsTranslation, obsScale, ridge, spreadRidge);
 		solves++;
-		return true;
-	}
 
-	Delta apply()
-	{
-		vr::HmdVector3d_t oldRotation = rotation, oldTranslation = translation;
-		double oldScale = scale;
-		double f = fraction * (weight < fullFractionSeconds ? weight / fullFractionSeconds : 1.0);
-		for (int i = 0; i < 3; i++)
+		vr::HmdVector3d_t candR = rotation, candT = translation;
+		double candS = scale;
+		if (okR)
+			for (int i = 0; i < 3; i++)
+				if (obsRotation[i] > obsMin) candR.v[i] = epsSol.v[i];
+		if (okT)
 		{
-			if (obsRotation[i] > obsMin)
-				rotation.v[i] += f * (solvedRotation.v[i] - rotation.v[i]);
-			if (obsTranslation[i] > obsMin)
-				translation.v[i] += f * (solvedTranslation.v[i] - translation.v[i]);
+			for (int i = 0; i < 3; i++)
+				if (obsTranslation[i] > obsMin) candT.v[i] = delSol.v[i];
+			if (scaleEnabled && obsScale > obsScaleMin) candS = kapSol;
 		}
-		if (scaleEnabled && obsScale > obsScaleMin)
-			scale += f * (solvedScale - scale);
-		double rn = vecNorm(rotation), tn = vecNorm(translation);
-		if (rn > maxRotation) rotation = vecScale(rotation, maxRotation / rn);
-		if (tn > maxTranslation) translation = vecScale(translation, maxTranslation / tn);
-		if (scale > maxScale) scale = maxScale;
-		if (scale < -maxScale) scale = -maxScale;
-		Delta d;
-		d.rotation = vecSub(rotation, oldRotation);
-		d.translation = vecSub(translation, oldTranslation);
-		d.scale = scale - oldScale;
-		return d;
+		solvedRotation = candR;
+		solvedTranslation = candT;
+		solvedScale = candS;
+
+		double rn = vecNorm(candR), tn = vecNorm(candT);
+		if (rn > maxRotation) candR = vecScale(candR, maxRotation / rn);
+		if (tn > maxTranslation) candT = vecScale(candT, maxTranslation / tn);
+		if (candS > maxScale) candS = maxScale;
+		if (candS < -maxScale) candS = -maxScale;
+
+		lastHadReference = previous.weight >= blockSeconds * 0.5;
+		lastAcceptedTranslation = false;
+		lastAcceptedRotation = false;
+		lastRmsBefore = lastRmsAfter = lastRotBefore = lastRotAfter = 0.0;
+
+		if (lastHadReference)
+		{
+			double N = previous.weight;
+			lastRmsBefore = std::sqrt(previous.translationCost(translation, scale) / N);
+			lastRmsAfter = std::sqrt(previous.translationCost(candT, candS) / N);
+			lastRotBefore = std::sqrt(previous.rotationCost(rotation) / N);
+			lastRotAfter = std::sqrt(previous.rotationCost(candR) / N);
+			lastAcceptedTranslation = okT && lastRmsAfter <= lastRmsBefore - minImprovementTranslation && lastRmsAfter <= minImprovementRatio * lastRmsBefore;
+			lastAcceptedRotation = okR && lastRotAfter <= lastRotBefore - minImprovementRotation && lastRotAfter <= minImprovementRatioRotation * lastRotBefore;
+
+			if (lastAcceptedTranslation)
+			{
+				vr::HmdVector3d_t step = vecSub(candT, translation);
+				double sn = vecNorm(step);
+				if (sn > stepTranslation) step = vecScale(step, stepTranslation / sn);
+				translation = vecAdd(translation, step);
+				out.translation = step;
+				double ds = candS - scale;
+				if (ds > stepScale) ds = stepScale;
+				if (ds < -stepScale) ds = -stepScale;
+				scale += ds;
+				out.scale = ds;
+				suspected = tn > suspectTranslation;
+			}
+			if (lastAcceptedRotation)
+			{
+				vr::HmdVector3d_t step = vecSub(candR, rotation);
+				double sn = vecNorm(step);
+				if (sn > stepRotation) step = vecScale(step, stepRotation / sn);
+				rotation = vecAdd(rotation, step);
+				out.rotation = step;
+				if (rn > suspectRotation) suspected = true;
+			}
+			if (lastAcceptedTranslation || lastAcceptedRotation)
+				applied++;
+		}
+
+		previous = current;
+		current.clear();
+		return true;
 	}
 };
 

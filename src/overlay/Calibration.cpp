@@ -600,10 +600,16 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 	// Follow mode: send the HMD command first so the driver is already in follow mode when the
 	// head tracker gets its transform. Otherwise transforms first, HMD command last.
+	bool noTrackerFollow = ctx.enabled && ctx.validProfile && ctx.followSlamHmd && ctx.noHeadTracker;
 	bool hmdCommandSent = false;
 	if (overrideActive && ctx.followSlamHmd)
 	{
 		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, ctx.targetID, true);
+		hmdCommandSent = true;
+	}
+	else if (noTrackerFollow)
+	{
+		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, true);
 		hmdCommandSent = true;
 	}
 
@@ -692,7 +698,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		{
 			ctx.driverStatus = statusResp.status;
 			const auto &st = ctx.driverStatus;
-			if (st.refinementValid && ctx.enabled && ctx.validProfile && st.calmSeconds >= 60.0)
+			if (st.refinementValid && ctx.enabled && ctx.validProfile && st.refinementSolves >= 1)
 			{
 				auto differs = [](double a, double b) { return std::fabs(a - b) > 1e-12; };
 				bool changed = differs(st.offsetRotation.w, ctx.relativeRotation.w) || differs(st.offsetRotation.x, ctx.relativeRotation.x)

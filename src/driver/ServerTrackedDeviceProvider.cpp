@@ -175,6 +175,17 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 			}
 			if (wasEnabled)
 				LOG("Head tracker offsets changed while running, mount refinement restarted");
+			if (cmd.followSlamHmd && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
+			{
+				drift.estimator.reset();
+				drift.estimator.valid = true;
+				drift.estimator.yaw = 0.0;
+				drift.estimator.translation = { 0, 0, 0 };
+				drift.rotation = { 1, 0, 0, 0 };
+				drift.translation = { 0, 0, 0 };
+				drift.valid = true;
+				LOG("Follow mode without head tracker: static alignment from calibration, headset recenters are carried over");
+			}
 		}
 		hmdTracker.enabled.store(true, std::memory_order_release);
 	}
@@ -293,8 +304,8 @@ void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
 	status.jumpsCompensated = drift.estimator.jumps;
 	status.sigmaYawDeg = drift.estimator.sigmaYaw() * 180.0 / POSE_PI;
 	status.sigmaTranslationM = drift.estimator.sigmaTranslation();
-	status.calmSeconds = refine.weight;
-	status.refinementSolves = refine.solves;
+	status.calmSeconds = refine.weight();
+	status.refinementSolves = refine.applied;
 
 	std::lock_guard<std::mutex> lock(effectiveMutex);
 	status.refinementValid = effectiveSharedValid && hmdTracker.enabled.load(std::memory_order_acquire);
@@ -832,48 +843,54 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 					double dtRefine = FilterStep(refineLast, refinePrimed);
 					refinePrimed = true;
-					if (refine.weight > 0.0 && (std::fabs(tauRotNow - refineTauRot) > 0.015 || std::fabs(tauPosNow - refineTauPos) > 0.015))
+					if (refine.weight() > 0.0 && (std::fabs(tauRotNow - refineTauRot) > 0.015 || std::fabs(tauPosNow - refineTauPos) > 0.015))
 					{
 						LOG("Mount refinement restarted, time alignment moved (rot %.1f -> %.1f ms, pos %.1f -> %.1f ms)",
 							refineTauRot * 1000.0, tauRotNow * 1000.0, refineTauPos * 1000.0, tauPosNow * 1000.0);
 						refine.clearSums();
 					}
-					if (refine.weight <= 0.0)
+					if (refine.weight() <= 0.0)
 					{
 						refineTauRot = tauRotNow;
 						refineTauPos = tauPosNow;
 					}
 					if (usable && drift.valid && confidence > 0.5 && clock.rot.primed && clock.pos.primed)
 					{
-						refine.add(headRotationBase, headPositionBase, rawRotation, vecFromArray(rawPosition), drift.estimator.yaw, SlamToCorrectedScaleBase(), confidence * dtRefine, dtRefine);
-						if (refine.due() && refine.solve())
+						refine.add(headRotationBase, headPositionBase, rawRotation, vecFromArray(rawPosition), drift.estimator.yaw, SlamToCorrectedScaleBase(), confidence * dtRefine);
+						align::MountRefiner::Delta applied;
+						if (refine.evaluate(applied))
 						{
 							double scaleBefore = SlamToCorrectedScale();
-							align::MountRefiner::Delta applied = refine.apply();
-							drift.estimator.absorbRefinement(applied.rotation, applied.translation, applied.scale, rawRotation, vecFromArray(rawPosition), headRotationBase, SlamToCorrectedScaleBase(), scaleBefore);
-							UpdateEffectiveOffsets();
+							bool changed = vecNorm(applied.rotation) > 0.0 || vecNorm(applied.translation) > 0.0 || applied.scale != 0.0;
+							if (changed)
+							{
+								drift.estimator.absorbRefinement(applied.rotation, applied.translation, applied.scale, rawRotation, vecFromArray(rawPosition), headRotationBase, SlamToCorrectedScaleBase(), scaleBefore);
+								UpdateEffectiveOffsets();
+							}
 
 							bool was = mount.suspected;
+							mount.suspected = refine.suspected;
 							mount.tiltDeg = refine.rotationAngle() * 180.0 / POSE_PI;
 							mount.translationDeviation = refine.translationDistance();
-							if (!mount.suspected && (mount.tiltDeg > 3.0 || mount.translationDeviation > 0.03))
-								mount.suspected = true;
-							else if (mount.suspected && mount.tiltDeg < 2.0 && mount.translationDeviation < 0.02)
-								mount.suspected = false;
 							if (was != mount.suspected)
-								LOG("Mount check: %s (correction so far %.2f deg, %.1f cm)", mount.suspected ? "tracker may have moved on the headset" : "back to normal", mount.tiltDeg, mount.translationDeviation * 100.0);
+								LOG("Mount check: %s (solution wants %.2f deg, %.1f cm)", mount.suspected ? "tracker may have moved on the headset" : "back to normal",
+									vecNorm(refine.solvedRotation) * 180.0 / POSE_PI, vecNorm(refine.solvedTranslation) * 100.0);
 
-							if (nowSeconds - refineLogTime > 30.0)
-							{
-								refineLogTime = nowSeconds;
-								LOG("Mount refinement: rotation (%.2f, %.2f, %.2f) deg, translation (%.1f, %.1f, %.1f) mm, scale %+.3f %%, calm data %.1f s, solves %u",
-									refine.rotation.v[0] * 180.0 / POSE_PI, refine.rotation.v[1] * 180.0 / POSE_PI, refine.rotation.v[2] * 180.0 / POSE_PI,
+							if (refine.lastHadReference)
+								LOG("Mount refinement block %u: translation rms %.1f -> %.1f mm (%s), rotation %.2f -> %.2f deg (%s), applied total (%.1f, %.1f, %.1f) mm / (%.2f, %.2f, %.2f) deg / scale %+.3f %%, obs (%.2f, %.2f, %.2f | %.2f, %.2f, %.2f | %.2f m2)",
+									refine.solves, refine.lastRmsBefore * 1000.0, refine.lastRmsAfter * 1000.0, refine.lastAcceptedTranslation ? "accepted" : "rejected",
+									refine.lastRotBefore * 180.0 / POSE_PI, refine.lastRotAfter * 180.0 / POSE_PI, refine.lastAcceptedRotation ? "accepted" : "rejected",
 									refine.translation.v[0] * 1000.0, refine.translation.v[1] * 1000.0, refine.translation.v[2] * 1000.0,
-									refine.scale * 100.0, refine.weight, refine.solves);
-							}
+									refine.rotation.v[0] * 180.0 / POSE_PI, refine.rotation.v[1] * 180.0 / POSE_PI, refine.rotation.v[2] * 180.0 / POSE_PI,
+									refine.scale * 100.0,
+									refine.obsTranslation[0], refine.obsTranslation[1], refine.obsTranslation[2],
+									refine.obsRotation[0], refine.obsRotation[1], refine.obsRotation[2], refine.obsScale);
+							else
+								LOG("Mount refinement block %u: reference block collected, obs (%.2f, %.2f, %.2f | %.2f, %.2f, %.2f | %.2f m2)", refine.solves,
+									refine.obsTranslation[0], refine.obsTranslation[1], refine.obsTranslation[2],
+									refine.obsRotation[0], refine.obsRotation[1], refine.obsRotation[2], refine.obsScale);
 						}
 					}
-
 				}
 
 				NoteTrackerState(trackerOK, true, tpLog, quaternionYawDeg(ts.rotation), relativeYawValid, relativeYaw);
