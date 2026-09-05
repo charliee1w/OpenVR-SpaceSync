@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 from pathlib import Path
 import unittest
 
@@ -54,6 +55,13 @@ class InspectionTests(unittest.TestCase):
         stream = result["streams"]["hmd:0:7"]
         self.assertEqual(stream["arrival_regressions"], 1)
         self.assertAlmostEqual(stream["interval_ms_p50"], 10)
+
+    def test_offset_conversion_overflow_is_invalid_and_json_remains_finite(self):
+        row = sample().strip().split(",")
+        row[8] = "1e308"
+        report = MODULE.inspect(capture([",".join(row) + "\n"]))
+        self.assertEqual(report["invalid_records"], 1)
+        json.dumps(report, allow_nan=False)
 
 
 if __name__ == "__main__":

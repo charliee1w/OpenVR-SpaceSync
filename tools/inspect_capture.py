@@ -60,7 +60,8 @@ def inspect(source):
             raise ValueError("pose record contains invalid time or identity")
         if valid not in (0, 1) or connected not in (0, 1):
             raise ValueError("pose record contains invalid tracking flags")
-        good = bool(valid and connected and result == 200 and all(map(math.isfinite, values)))
+        offset_ms = values[0] * 1000
+        good = bool(valid and connected and result == 200 and all(map(math.isfinite, values)) and math.isfinite(offset_ms))
         for start in (9, 25, 32):
             quaternion = list(map(float, columns[start:start + 4]))
             norm2 = sum(value * value for value in quaternion)
@@ -73,8 +74,8 @@ def inspect(source):
             stream["arrival_regressions"] += 1
         stream["times"].append(arrival)
         stream["invalid"] += not good
-        if math.isfinite(values[0]):
-            stream["offsets"].append(values[0] * 1000)
+        if math.isfinite(offset_ms):
+            stream["offsets"].append(offset_ms)
 
     def percentile(values, fraction):
         if not values:
@@ -82,7 +83,8 @@ def inspect(source):
         ordered = sorted(values)
         position = fraction * (len(ordered) - 1)
         lower = int(position)
-        return ordered[lower] + (ordered[min(lower + 1, len(ordered) - 1)] - ordered[lower]) * (position - lower)
+        weight = position - lower
+        return (1 - weight) * ordered[lower] + weight * ordered[min(lower + 1, len(ordered) - 1)]
 
     output = {}
     for key, stream in sorted(streams.items()):

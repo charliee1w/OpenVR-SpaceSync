@@ -24,6 +24,9 @@ public:
     public:
         virtual ~Sink() = default;
         virtual bool Write(std::string_view data) noexcept = 0;
+        // Thread-safe, nonblocking cancellation; any outstanding Write must
+        // relinquish its buffers before returning. Future writes must fail.
+        virtual void Cancel() noexcept = 0;
     };
 
     PoseCapture() = default;
@@ -56,7 +59,7 @@ private:
     std::unique_ptr<Record[]> queue;
     std::unique_ptr<Sink> sink;
     size_t head = 0, count = 0;
-    bool stopping = false, hasFirst = false;
+    bool stopping = false, hasFirst = false, finished = false;
     double firstArrival = 0;
     Limits limits;
 };

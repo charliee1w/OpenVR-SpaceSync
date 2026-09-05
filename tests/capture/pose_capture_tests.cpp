@@ -12,13 +12,15 @@ using spacesync::PoseCapture;
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 struct State {
     std::string data;
-    std::atomic<bool> block{false}, entered{false}, fail{false};
+    std::atomic<bool> block{false}, entered{false}, fail{false}, failFooter{false};
 };
 class MemorySink final : public PoseCapture::Sink {
     std::shared_ptr<State> state;
 public:
     explicit MemorySink(std::shared_ptr<State> state) : state(std::move(state)) {}
+    void Cancel() noexcept override { state->fail = true; state->block = false; }
     bool Write(std::string_view data) noexcept override {
+        if (data.starts_with("# end,") && state->failFooter) return false;
         if (data.starts_with("sample,")) {
             state->entered = true;
             while (state->block.load()) std::this_thread::yield();
@@ -102,6 +104,23 @@ static void failure() {
     std::filesystem::remove(path);
     require(!c.Start(path / "missing" / "capture.csv"), "missing directory reported successful start");
 }
+static void footerFailure() {
+    PoseCapture c; auto s = std::make_shared<State>(); s->failFooter = true;
+    require(c.Start(std::make_unique<MemorySink>(s), {}), "footer failure start");
+    require(record(c), "footer failure record"); c.Stop();
+    const auto stats = c.GetStats();
+    require(stats.ioFailed && stats.accepted == 1 && stats.written == 1 && stats.dropped == 0,
+        "footer failure invented a dropped pose");
+}
+static void stopBlockedSink() {
+    PoseCapture c; auto s = std::make_shared<State>(); s->block = true;
+    require(c.Start(std::make_unique<MemorySink>(s), {}), "stop blocker start");
+    require(record(c), "stop blocker record"); until([&] { return s->entered.load(); });
+    auto stopping = std::async(std::launch::async, [&] { c.Stop(); });
+    const bool completed = stopping.wait_for(std::chrono::milliseconds(750)) == std::future_status::ready;
+    s->block = false; stopping.get();
+    require(completed, "capture shutdown did not cancel a blocked sink");
+}
 int main(int argc, char** argv) {
     if (argc == 3 && std::string_view(argv[1]) == "--write-fixture") {
         PoseCapture c;
@@ -110,6 +129,6 @@ int main(int argc, char** argv) {
         c.Stop();
         return c.GetStats().written == 1 && !c.GetStats().ioFailed ? 0 : 1;
     }
-    try { lifecycle(); bounds(); saturation(); failure(); std::puts("PASS: bounded pose capture"); return 0; }
+    try { lifecycle(); bounds(); saturation(); failure(); stopBlockedSink(); footerFailure(); std::puts("PASS: bounded pose capture"); return 0; }
     catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }
 }

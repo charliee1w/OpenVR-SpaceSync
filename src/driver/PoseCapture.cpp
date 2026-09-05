@@ -2,6 +2,7 @@
 #include "PoseCapture.h"
 #include <Windows.h>
 #include <cmath>
+#include <chrono>
 #include <iomanip>
 #include <locale>
 #include <sstream>
@@ -17,17 +18,50 @@ constexpr std::string_view Header =
 
 class FileSink final : public PoseCapture::Sink {
     HANDLE file;
+    HANDLE cancelled, completed;
+    uint64_t offset = 0;
 public:
     explicit FileSink(const std::filesystem::path& path)
         : file(CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
-    ~FileSink() override { if (file != INVALID_HANDLE_VALUE) CloseHandle(file); }
-    bool Valid() const { return file != INVALID_HANDLE_VALUE; }
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr)),
+          cancelled(CreateEventW(nullptr, TRUE, FALSE, nullptr)),
+          completed(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+    ~FileSink() override {
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        if (cancelled) CloseHandle(cancelled);
+        if (completed) CloseHandle(completed);
+    }
+    bool Valid() const { return file != INVALID_HANDLE_VALUE && cancelled && completed; }
+    void Cancel() noexcept override {
+        // The event also closes the race where cancellation precedes WriteFile.
+        SetEvent(cancelled);
+        CancelIoEx(file, nullptr);
+    }
     bool Write(std::string_view data) noexcept override {
         while (!data.empty()) {
+            if (WaitForSingleObject(cancelled, 0) != WAIT_TIMEOUT) return false;
             DWORD bytes = 0;
             const DWORD chunk = static_cast<DWORD>((std::min)(data.size(), size_t(1 << 20)));
-            if (!WriteFile(file, data.data(), chunk, &bytes, nullptr) || bytes == 0) return false;
+            OVERLAPPED operation{};
+            operation.Offset = static_cast<DWORD>(offset);
+            operation.OffsetHigh = static_cast<DWORD>(offset >> 32);
+            operation.hEvent = completed;
+            ResetEvent(completed);
+            if (!WriteFile(file, data.data(), chunk, &bytes, &operation)) {
+                if (GetLastError() != ERROR_IO_PENDING) return false;
+                HANDLE events[] = {completed, cancelled};
+                const DWORD result = WaitForMultipleObjects(2, events, FALSE, 1000);
+                if (result != WAIT_OBJECT_0) {
+                    CancelIoEx(file, &operation);
+                    // Windows owns operation/data until cancellation completes.
+                    // Never abandon those buffers or terminate the I/O thread.
+                    GetOverlappedResult(file, &operation, &bytes, TRUE);
+                    return false;
+                }
+                if (!GetOverlappedResult(file, &operation, &bytes, FALSE)) return false;
+            }
+            if (bytes == 0) return false;
+            offset += bytes;
             data.remove_prefix(bytes);
         }
         return true;
@@ -58,7 +92,7 @@ bool PoseCapture::Start(std::unique_ptr<Sink> destination, Limits requested) {
         sink = std::move(destination);
         limits = requested;
         head = count = 0;
-        stopping = hasFirst = false;
+        stopping = hasFirst = finished = false;
         accepted = written = dropped = 0;
         ioFailed = false;
         worker = std::thread(&PoseCapture::Run, this);
@@ -76,7 +110,13 @@ void PoseCapture::Stop() noexcept {
         stopping = true;
     }
     ready.notify_one();
-    if (worker.joinable()) worker.join();
+    if (worker.joinable()) {
+        std::unique_lock lock(mutex);
+        const bool drained = ready.wait_for(lock, std::chrono::milliseconds(200), [&] { return finished; });
+        lock.unlock();
+        if (!drained) sink->Cancel();
+        worker.join();
+    }
     queue.reset();
     sink.reset();
 }
@@ -112,6 +152,7 @@ PoseCapture::Stats PoseCapture::GetStats() const noexcept {
 }
 
 void PoseCapture::Run() noexcept {
+    bool pendingRecord = false;
     try {
         for (;;) {
             Record record;
@@ -121,6 +162,7 @@ void PoseCapture::Run() noexcept {
                 if (count == 0) break;
                 record = queue[head];
                 head = (head + 1) % Capacity; --count;
+                pendingRecord = true;
             }
             // Preserve invalid poses too: their flags/NaNs mark a diagnostic gap.
             // Formatting and file I/O only happen on this worker.
@@ -143,6 +185,7 @@ void PoseCapture::Run() noexcept {
             row << '\n';
             if (!sink->Write(row.str())) throw std::runtime_error("capture write failed");
             ++written;
+            pendingRecord = false;
         }
         const auto stats = GetStats();
         const auto footer = "# end,accepted=" + std::to_string(stats.accepted)
@@ -152,8 +195,13 @@ void PoseCapture::Run() noexcept {
         enabled.store(false, std::memory_order_release);
         ioFailed = true;
         std::lock_guard lock(mutex);
-        dropped.fetch_add(count + 1);
+        dropped.fetch_add(count + (pendingRecord ? 1 : 0));
         count = 0; stopping = true;
     }
+    {
+        std::lock_guard lock(mutex);
+        finished = true;
+    }
+    ready.notify_all();
 }
 }
