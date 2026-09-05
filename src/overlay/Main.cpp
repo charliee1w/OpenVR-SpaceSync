@@ -12,6 +12,8 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <filesystem>
+#include <vector>
 
 #include <imgui.h>
 #include <backends/imgui_impl_sdl3.h>
@@ -37,6 +39,7 @@
 #include "Configuration.h"
 #include "UserInterface.h"
 #include "Sound.h"
+#include "InstallSupport.h"
 
 #ifdef _WIN32
 extern "C" __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
@@ -371,103 +374,73 @@ int main(int argc, char** argv)
     return 0;
 }
 
+static std::string RuntimePath()
+{
+    std::vector<char> path(4096, 0);
+    uint32_t required = 0;
+    bool ok = vr::VR_GetRuntimePath(path.data(), static_cast<uint32_t>(path.size()), &required);
+    if (!ok && required > path.size() && required <= 65536) {
+        path.assign(required, 0);
+        ok = vr::VR_GetRuntimePath(path.data(), static_cast<uint32_t>(path.size()), &required);
+    }
+    if (!ok || required == 0 || required > path.size() || path[0] == '\0' || path[required - 1] != '\0')
+        throw std::runtime_error("Could not resolve a valid OpenVR runtime path.");
+    return path.data();
+}
+
 static auto HandleCommandLine(int argc, char** argv) -> void
 {
-    if (argc < 2)
-        return;
-
+    if (argc < 2) return;
     const std::string arg = argv[1];
-
-    char cwd[1024] = { 0 };
-    _getcwd(cwd, sizeof(cwd));
-
-    if (arg == "-openvrpath")
-    {
-        auto vrErr = vr::VRInitError_None;
-        vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-        if (vrErr == vr::VRInitError_None)
-        {
-            char runtimePath[1024] = { 0 };
-            unsigned int pathLen = 0;
-            vr::VR_GetRuntimePath(runtimePath, sizeof(runtimePath), &pathLen);
-
-            printf("%s", runtimePath);
-            vr::VR_Shutdown();
-            exit(0);
+    bool initialized = false;
+    try {
+        if (arg == "-openvrpath") {
+            const auto path = RuntimePath();
+            if (!std::filesystem::is_regular_file(std::filesystem::u8path(path) / "bin" / "win64" / "vrpathreg.exe"))
+                throw std::runtime_error("The OpenVR runtime has no registration tool.");
+            printf("%s", path.c_str());
+            exit(EXIT_SUCCESS);
         }
-        fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
+        if (arg != "-installmanifest" && arg != "-removemanifest" && arg != "-activatemultipledrivers"
+            && arg != "-legacystatus" && arg != "-disablelegacy" && arg != "-enablelegacy")
+            throw std::runtime_error("Unknown SpaceSync command-line option.");
+
+        auto error = vr::VRInitError_None;
+        vr::VR_Init(&error, vr::VRApplication_Utility);
+        if (error != vr::VRInitError_None)
+            throw std::runtime_error(std::string("Failed to initialize OpenVR: ") + vr::VR_GetVRInitErrorAsEnglishDescription(error));
+        initialized = true;
+
+        if (arg == "-installmanifest" || arg == "-removemanifest") {
+            auto* apps = vr::VRApplications();
+            if (!apps) throw std::runtime_error("OpenVR application management is unavailable.");
+            const char* basePath = SDL_GetBasePath();
+            if (argc < 3 && !basePath) throw std::runtime_error("Could not locate the application manifest.");
+            const std::string manifest = argc >= 3 ? argv[2] : std::string(basePath) + "manifest.vrmanifest";
+            if (arg == "-installmanifest") install::addManifest(*apps, APP_KEY, manifest.c_str());
+            else install::removeManifest(*apps, APP_KEY, manifest.c_str());
+        }
+        else if (arg == "-activatemultipledrivers") {
+            if (!vr::VRSettings()) throw std::runtime_error("OpenVR settings are unavailable.");
+            ActivateMultipleDrivers();
+        }
+        else {
+            auto* settings = vr::VRSettings();
+            if (!settings) throw std::runtime_error("OpenVR settings are unavailable.");
+            if (arg == "-legacystatus") {
+                auto* drivers = vr::VRDriverManager();
+                if (!drivers) throw std::runtime_error("OpenVR driver inspection is unavailable.");
+                const bool present = install::hasLegacy(*drivers, std::filesystem::u8path(RuntimePath()));
+                printf("%s", !present ? "absent" : (install::legacyEnabled(*settings) ? "enabled" : "disabled"));
+            }
+            else install::setLegacyEnabled(*settings, arg == "-enablelegacy");
+        }
         vr::VR_Shutdown();
-        exit(-2);
+        exit(EXIT_SUCCESS);
     }
-    else if (arg == "-installmanifest")
-    {
-        auto vrErr = vr::VRInitError_None;
-        vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-        if (vrErr == vr::VRInitError_None)
-        {
-            if (vr::VRApplications()->IsApplicationInstalled(APP_KEY))
-            {
-                char oldWd[1024] = { 0 };
-                auto vrAppErr = vr::VRApplicationError_None;
-                vr::VRApplications()->GetApplicationPropertyString(APP_KEY, vr::VRApplicationProperty_WorkingDirectory_String, oldWd, sizeof(oldWd), &vrAppErr);
-                if (vrAppErr == vr::VRApplicationError_None)
-                {
-                    std::string oldManifest = std::string(oldWd) + "\\manifest.vrmanifest";
-                    vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
-                }
-            }
-            std::string manifestPath = std::string(cwd) + "\\manifest.vrmanifest";
-            auto vrAppErr = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
-            if (vrAppErr != vr::VRApplicationError_None)
-                fprintf(stderr, "Failed to add manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
-            else
-                vr::VRApplications()->SetApplicationAutoLaunch(APP_KEY, true);
-
-            vr::VR_Shutdown();
-            exit(0);
-        }
-        fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-        vr::VR_Shutdown();
-        exit(-2);
-    }
-    else if (arg == "-removemanifest")
-    {
-        auto vrErr = vr::VRInitError_None;
-        vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-        if (vrErr == vr::VRInitError_None)
-        {
-            if (vr::VRApplications()->IsApplicationInstalled(APP_KEY))
-            {
-                std::string manifestPath = std::string(cwd) + "\\manifest.vrmanifest";
-                vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-            }
-            vr::VR_Shutdown();
-            exit(0);
-        }
-        fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-        vr::VR_Shutdown();
-        exit(-2);
-    }
-    else if (arg == "-activatemultipledrivers")
-    {
-        int ret = -2;
-        auto vrErr = vr::VRInitError_None;
-        vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-        if (vrErr == vr::VRInitError_None)
-        {
-            try {
-                ActivateMultipleDrivers();
-                ret = 0;
-            }
-            catch (std::runtime_error& e) {
-                fprintf(stderr, "%s\n", e.what());
-            }
-        }
-        else
-        {
-            fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-        }
-        vr::VR_Shutdown();
-        exit(ret);
+    catch (const std::exception& error) {
+        fprintf(stderr, "%s\n", error.what());
+        if (initialized) vr::VR_Shutdown();
+        exit(EXIT_FAILURE);
     }
 }
