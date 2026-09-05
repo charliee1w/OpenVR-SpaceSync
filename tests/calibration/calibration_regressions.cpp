@@ -187,17 +187,144 @@ void LossTimeoutRollback() {
 }
 void TwoAxesComplete() {
     Reset();
-    for (int i = 1; i <= 205; ++i) Tick(0.1 + i * 0.06, i);
+    for (int i = 1; i <= 420; ++i) Tick(0.1 + i * 0.06, i);
     Require(CalCtx.lastCalibrationOk && CalCtx.state == CalibrationState::None,
         "observable +/-30 degree two-axis calibration was rejected");
     Require(CalCtx.trackerSerial == "B" && saves == 1, "successful calibration was not committed once");
+    Require(CalCtx.calibrationCheck.passed && !CalCtx.calibrationCheck.scaleMeasured && CalCtx.calibrationCheck.scale == 1.0,
+        "head rotations falsely reported independently measured scale");
+    Require(CalCtx.calibrationCheck.positionRmsMm < 0.01 && CalCtx.calibrationCheck.angularRmsDegrees < 0.01,
+        "exact held-out rigid motion did not report its measured consistency");
+    CalibrationContext loaded = CalCtx; TestLoadProfile(loaded);
+    Require(!loaded.calibrationCheck.passed, "profile reload retained a check not present in the saved profile");
+}
+void FitRemainsPrivate() {
+    Reset();
+    for (int i = 1; i <= 205; ++i) Tick(0.1 + i * 0.06, i);
+    Require(CalCtx.state == CalibrationState::Sampling && !CalCtx.lastCalibrationOk && saves == 0,
+        "training fit was published before independent validation");
+    Require(CalCtx.trackerSerial == "A" && CalCtx.relativeTranslation.v[0] == 0.01,
+        "unvalidated fit replaced the active profile");
+    TestSaveProfile(CalCtx);
+    CalibrationContext loaded{}; TestLoadProfile(loaded);
+    Require(loaded.trackerSerial == "A" && loaded.relativeTranslation.v[0] == 0.01,
+        "shutdown during validation persisted the unvalidated candidate");
+    CancelCalibration();
+}
+void HeldOutBadPosition() {
+    Reset();
+    for (int i = 1; i <= 205; ++i) Tick(0.1 + i * 0.06, i);
+    for (int i = 206; i <= 420; ++i) {
+        SetMotion(i, true);
+        system.poses[0].mDeviceToAbsoluteTracking.m[0][3] += 0.15f;
+        CalibrationTick(0.1 + i * 0.06);
+    }
+    Require(!CalCtx.lastCalibrationOk && CalCtx.trackerSerial == "A" && saves == 0,
+        "good training fit accepted an inconsistent held-out position segment");
+}
+void HeldOutBadAngle() {
+    Reset();
+    for (int i = 1; i <= 205; ++i) Tick(0.1 + i * 0.06, i);
+    for (int i = 206; i <= 420; ++i) {
+        SetMotion(i, true);
+        const auto& original = system.poses[0].mDeviceToAbsoluteTracking;
+        Pose pose(original);
+        system.poses[0] = DevicePose(pose.rot * Eigen::AngleAxisd(0.15, Eigen::Vector3d::UnitZ()).toRotationMatrix(), pose.trans);
+        CalibrationTick(0.1 + i * 0.06);
+    }
+    Require(!CalCtx.lastCalibrationOk && CalCtx.trackerSerial == "A" && saves == 0,
+        "good training fit accepted inconsistent held-out orientation");
+}
+int FitCandidate() {
+    int i = 0;
+    while (!CalCtx.validating && i < 205) { ++i; Tick(0.1 + i * 0.06, i); }
+    Require(CalCtx.validating && saves == 0, "fit did not enter private validation");
+    return i;
+}
+void HeldOutCoverageTimeout() {
+    Reset();
+    int i = FitCandidate();
+    for (++i; i <= 850 && CalCtx.state == CalibrationState::Sampling; ++i) Tick(0.1 + i * 0.06, i, false);
+    Require(CalCtx.state == CalibrationState::None && !CalCtx.lastCalibrationOk && saves == 0 && CalCtx.trackerSerial == "A",
+        "training motion substituted for missing independent validation axes");
+}
+void HeldOutCoverageRecovery() {
+    Reset();
+    int i = FitCandidate();
+    const int fitEnd = i;
+    for (++i; i <= fitEnd + 215; ++i) Tick(0.1 + i * 0.06, i, false);
+    Require(CalCtx.validating && saves == 0, "insufficient validation did not provide a new complete sequence");
+    for (; i <= fitEnd + 440 && CalCtx.state == CalibrationState::Sampling; ++i) Tick(0.1 + i * 0.06, i);
+    Require(CalCtx.lastCalibrationOk && CalCtx.calibrationCheck.passed && saves == 1,
+        "eventual complete independent validation failed");
+}
+void HeldOutErrorIsNotRetried() {
+    Reset();
+    int i = FitCandidate();
+    const int end = i + 210;
+    for (++i; i <= end && CalCtx.state == CalibrationState::Sampling; ++i) {
+        SetMotion(i, false); // inadequate axes, but the observed positions already disagree
+        system.poses[0].mDeviceToAbsoluteTracking.m[0][3] += 0.15f;
+        CalibrationTick(0.1 + i * 0.06);
+    }
+    Require(CalCtx.state == CalibrationState::None && !CalCtx.lastCalibrationOk && saves == 0,
+        "coverage retry discarded contrary held-out evidence and allowed another chance to pass");
+}
+void HeldOutTrackingLoss() {
+    Reset();
+    int i = FitCandidate();
+    system.poses[1].bPoseIsValid = false;
+    CalibrationTick(0.1 + ++i * 0.06);
+    Require(CalCtx.validating && saves == 0, "brief invalid held-out sample aborted or committed the fit");
+    Tick(0.1 + ++i * 0.06, i);
+    Require(CalCtx.validating, "validation did not resume after brief loss");
+    for (int end = i + 45; i < end; ++i) {
+        system.poses[1].mDeviceToAbsoluteTracking.m[0][3] = std::numeric_limits<float>::quiet_NaN();
+        CalibrationTick(0.1 + (i + 1) * 0.06);
+    }
+    Require(CalCtx.state == CalibrationState::None && CalCtx.trackerSerial == "A" && saves == 0,
+        "invalid held-out poses did not time out and restore the prior profile");
+}
+void HeldOutSegmentFailure() {
+    Reset();
+    int i = FitCandidate();
+    const int end = i + 220;
+    for (++i; i <= end && CalCtx.state == CalibrationState::Sampling; ++i) {
+        SetMotion(i, true);
+        // A 4 cm error for one 1.5 s segment passes the aggregate 3 cm RMS /
+        // 5 cm p95 / 10 cm peak gates, but must fail that segment's RMS gate.
+        const double elapsed = (0.1 + i * 0.06) - CalCtx.sequenceStart;
+        if (elapsed >= 6.0 && elapsed < 7.5) system.poses[0].mDeviceToAbsoluteTracking.m[0][3] += 0.04f;
+        CalibrationTick(0.1 + i * 0.06);
+    }
+    Require(!CalCtx.lastCalibrationOk && CalCtx.state == CalibrationState::None && CalCtx.trackerSerial == "A" && saves == 0,
+        "a bad held-out direction was averaged away by good segments");
+}
+void HeldOutCancel() {
+    Reset(); FitCandidate();
+    CancelCalibration();
+    Require(CalCtx.state == CalibrationState::None && !CalCtx.validating && !CalCtx.lastCalibrationOk
+        && CalCtx.trackerSerial == "A" && CalCtx.relativeTranslation.v[0] == 0.01 && saves == 0,
+        "cancelling independent validation failed to restore the prior profile");
+}
+void HeldOutMissingSegment() {
+    Reset();
+    int i = FitCandidate();
+    for (++i; i <= 850 && CalCtx.state == CalibrationState::Sampling; ++i) {
+        SetMotion(i, true);
+        const double elapsed = (0.1 + i * 0.06) - CalCtx.sequenceStart;
+        if (elapsed >= 3.0 && elapsed < 4.5) system.poses[1].bPoseIsValid = false;
+        CalibrationTick(0.1 + i * 0.06);
+    }
+    Require(CalCtx.state == CalibrationState::None && CalCtx.trackerSerial == "A" && saves == 0,
+        "partial validation sequences were accepted without coverage of every segment");
 }
 void RetryWaitAndRecover() {
     Reset();
     for (int i = 1; i <= 215; ++i) Tick(0.1 + i * 0.06, i, false);
     Require(CalCtx.state == CalibrationState::Sampling && !CalCtx.lastCalibrationOk,
         "retry window aborted before new motion could be collected");
-    for (int i = 216; i <= 500 && CalCtx.state == CalibrationState::Sampling; ++i) Tick(0.1 + i * 0.06, i, true);
+    for (int i = 216; i <= 700 && CalCtx.state == CalibrationState::Sampling; ++i) Tick(0.1 + i * 0.06, i, true);
     Require(CalCtx.lastCalibrationOk, "additional observable motion failed to complete calibration");
 }
 void SingleAxisTimeout() {
@@ -216,7 +343,7 @@ void RetryCancel() {
 void SaveFailureRollback() {
     Reset();
     saveFailure = true;
-    for (int i = 1; i <= 205; ++i) Tick(0.1 + i * 0.06, i);
+    for (int i = 1; i <= 420; ++i) Tick(0.1 + i * 0.06, i);
     Require(!CalCtx.lastCalibrationOk && CalCtx.trackerSerial == "A" && CalCtx.relativeTranslation.v[0] == 0.01,
         "failed persistence committed the replacement calibration");
     Require(saves == 0, "failed save replaced the persisted profile");
@@ -249,6 +376,8 @@ void PoseIngressValidation() {
     Require(!CollectSample(CalCtx).valid, "non-finite pose accepted");
     CalCtx.devicePoses[1] = system.poses[1]; CalCtx.devicePoses[1].mDeviceToAbsoluteTracking.m[0][0] = 3;
     Require(!CollectSample(CalCtx).valid, "non-rigid pose accepted");
+    CalCtx.devicePoses[1] = system.poses[1]; CalCtx.devicePoses[1].mDeviceToAbsoluteTracking.m[0][3] = 1e20f;
+    Require(!CollectSample(CalCtx).valid, "finite but impossible calibration position accepted");
     CalCtx.targetID = vr::k_unTrackedDeviceIndexInvalid;
     Require(!CollectSample(CalCtx).valid, "invalid device index accepted");
     CancelCalibration();
@@ -351,6 +480,75 @@ void ScaleNeedsIndependentTranslation() {
     Require(std::abs(EstimateHmdSpaceScale(samples, Eigen::Matrix3d::Identity(), 1.0) - 1.0) < 1e-12,
         "unobservable scale/mount coupling produced a fitted scale");
 }
+void MeasuredScaleAndFallback() {
+    std::vector<Sample> samples;
+    constexpr double scale = 1.012;
+    const Eigen::Vector3d mount(0.02, -0.08, 0.06);
+    for (int i = 0; i < 120; ++i) {
+        Eigen::Matrix3d rotation = (Eigen::AngleAxisd(0.5 * std::sin(i * 0.15), Eigen::Vector3d::UnitX())
+            * Eigen::AngleAxisd(0.5 * std::cos(i * 0.13), Eigen::Vector3d::UnitY())).toRotationMatrix();
+        Eigen::Vector3d position(0.9 * std::sin(i * 0.071), 1.7 + 0.5 * std::cos(i * 0.093), 0.8 * std::cos(i * 0.051));
+        samples.emplace_back(Pose(DevicePose(rotation, scale * (position + rotation * mount)).mDeviceToAbsoluteTracking),
+            Pose(DevicePose(rotation, position).mDeviceToAbsoluteTracking));
+    }
+    bool measured = false;
+    const double fitted = EstimateHmdSpaceScale(samples, Eigen::Matrix3d::Identity(), 1.0, &measured);
+    Require(measured && std::abs(fitted - scale) < 1e-5, "independent translation failed to identify measured scale");
+    CalibrationContext candidate{};
+    candidate.hmdScale = fitted; candidate.validRelativeOffset = true;
+    candidate.relativeTranslation = {mount.x(), mount.y(), mount.z()};
+    Require(CheckAlignment(candidate, samples).passed, "validation compared raw and scale-corrected positions in different units");
+    for (auto &sample : samples) sample.ref.trans *= 1.1;
+    Require(EstimateHmdSpaceScale(samples, Eigen::Matrix3d::Identity(), 1.0, &measured) == 1.0 && !measured,
+        "out-of-range scale was reported as measured");
+    measured = true;
+    Require(EstimateHmdSpaceScale({}, Eigen::Matrix3d::Identity(), 1.0, &measured) == 1.0 && !measured,
+        "empty scale data retained a measured status");
+}
+void AlignmentBoundsAndTailErrors() {
+    CalibrationContext candidate{}; candidate.validRelativeOffset = true;
+    Pose pose(DevicePose(Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero()).mDeviceToAbsoluteTracking);
+    std::vector<Sample> samples(80, Sample(pose, pose));
+    Require(CheckAlignment(candidate, samples).passed, "exact alignment control failed");
+    for (int i = 0; i < 10; ++i) samples[i].ref.trans.x() = 0.04;
+    Require(CheckAlignment(candidate, samples).passed, "aggregate control for the segment failure test was not below limits");
+    for (int i = 0; i < 10; ++i) samples[i].ref.trans.x() = 0.06;
+    Require(!CheckAlignment(candidate, samples).passed, "position p95 failure was hidden by good RMS");
+    samples.assign(80, Sample(pose, pose)); samples[0].ref.trans.x() = 0.11;
+    Require(!CheckAlignment(candidate, samples).passed, "single large position excursion was ignored");
+    samples.assign(80, Sample(pose, pose));
+    for (int i = 0; i < 10; ++i) samples[i].ref.rot = Eigen::AngleAxisd(3.5 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    Require(!CheckAlignment(candidate, samples).passed, "angular p95 failure was hidden by good RMS");
+    samples.assign(80, Sample(pose, pose));
+    samples[0].ref.rot = Eigen::AngleAxisd(7.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    Require(!CheckAlignment(candidate, samples).passed, "single large angular excursion was ignored");
+    samples.assign(80, Sample(pose, pose)); samples[0].valid = false;
+    Require(!CheckAlignment(candidate, samples).passed, "invalid sample entered the agreement check");
+    samples[0].valid = true; samples[0].ref.trans.x() = std::numeric_limits<double>::quiet_NaN();
+    Require(!CheckAlignment(candidate, samples).passed, "non-finite check input passed");
+    samples.assign(80, Sample(pose, pose));
+    for (double scale : {0.0, 2.0, std::numeric_limits<double>::infinity()}) {
+        candidate.hmdScale = scale;
+        Require(!CheckAlignment(candidate, samples).passed, "invalid candidate scale passed");
+    }
+    candidate.hmdScale = 1.0; candidate.relativeTranslation.v[0] = 10.0;
+    Require(!FiniteCandidate(candidate), "impossible mount was accepted");
+    candidate.relativeTranslation.v[0] = 0.0; candidate.relativeRotation.w = 0.0;
+    Require(!FiniteCandidate(candidate), "zero quaternion candidate was accepted");
+}
+void AdaptiveMotionGuidance() {
+    std::vector<Sample> samples;
+    for (int i = 0; i < 100; ++i) {
+        SetMotion(i, false);
+        samples.emplace_back(Pose(system.poses[0].mDeviceToAbsoluteTracking), Pose(system.poses[1].mDeviceToAbsoluteTracking));
+    }
+    Require(MissingMotionGuidance(samples).find("nods") != std::string::npos, "yaw-only motion did not request nods");
+    for (auto &sample : samples) {
+        const double angle = RotationVector(sample.ref.rot).y();
+        sample.ref.rot = Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitX()).toRotationMatrix();
+    }
+    Require(MissingMotionGuidance(samples).find("turns") != std::string::npos, "pitch-only motion did not request turns");
+}
 }
 
 int main(int argc, char** argv) {
@@ -364,6 +562,14 @@ int main(int argc, char** argv) {
         {"geometry_bounds", test::ProfileGeometryBounds},
         {"profile_roots_legacy", test::ProfileRootsAndLegacyDefaults}, {"profile_optional_bounds", test::ProfileOptionalTypesAndBounds},
         {"scale_observability", test::ScaleNeedsIndependentTranslation},
+        {"fit_remains_private", test::FitRemainsPrivate},
+        {"heldout_bad_position", test::HeldOutBadPosition}, {"heldout_bad_angle", test::HeldOutBadAngle},
+        {"heldout_coverage_timeout", test::HeldOutCoverageTimeout}, {"heldout_coverage_recovery", test::HeldOutCoverageRecovery},
+        {"heldout_error_not_retried", test::HeldOutErrorIsNotRetried},
+        {"heldout_tracking_loss", test::HeldOutTrackingLoss}, {"heldout_segment_failure", test::HeldOutSegmentFailure},
+        {"heldout_cancel", test::HeldOutCancel}, {"heldout_missing_segment", test::HeldOutMissingSegment},
+        {"scale_measured_fallback", test::MeasuredScaleAndFallback}, {"alignment_bounds_tails", test::AlignmentBoundsAndTailErrors},
+        {"adaptive_guidance", test::AdaptiveMotionGuidance},
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

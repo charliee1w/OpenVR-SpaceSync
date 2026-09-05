@@ -458,12 +458,29 @@ void UserInterface::RenderCalibration(const Status& status)
 	ImGui::SetCursorScreenPos(ImVec2(c.x - total * 0.5f, ImGui::GetCursorScreenPos().y));
 	if (Button("Edit Calibration", edit))
 	{
+		CalCtx.calibrationCheck = {};
 		editView_ = true;
 		CalCtx.state = CalibrationState::Editing;
 	}
 	ImGui::SameLine(0.0f, px(8.0f));
 	if (Button("Remove Calibration", remove))
 		confirmRemove_ = true;
+
+	if (calibrated)
+	{
+		VSpace(14.0f);
+		std::string evidence = "No independent check recorded for this profile.";
+		if (CalCtx.calibrationCheck.passed)
+		{
+			const auto &check = CalCtx.calibrationCheck;
+			char summary[192];
+			std::snprintf(summary, sizeof summary, "Last calibration check: %.1f mm / %.2f deg RMS agreement.\nScale %s: %.4f.",
+				check.positionRmsMm, check.angularRmsDegrees, check.scaleMeasured ? "measured" : "assumed", check.scale);
+			evidence = summary;
+		}
+		ImGui::SetCursorScreenPos(ImVec2(c.x - px(190.0f), ImGui::GetCursorScreenPos().y));
+		TextWrapped(F.regular, 12.0f, P.textMuted, 380.0f, evidence.c_str());
+	}
 
 	if (calibrated && CalCtx.driverStatus.mountShiftSuspected)
 	{
@@ -868,9 +885,9 @@ void UserInterface::RenderSettings()
 
 		struct SpeedOpt { const char* label; const char* hint; CalibrationContext::Speed speed; };
 		const SpeedOpt speeds[3] = {
-			{ "Fast", "One pass through the look-around sequence. Quickest option, but small mistakes during calibration show up as inaccuracy.", CalibrationContext::FAST },
-			{ "Slow", "Recommended. Two passes through the look-around sequence, so the same samples cover more directions.", CalibrationContext::SLOW },
-			{ "Very Slow", "Three passes and the most samples. Use this when you want the most precise result.", CalibrationContext::VERY_SLOW },
+			{ "Fast", "One fitting pass, followed by a separate 12-second alignment check.", CalibrationContext::FAST },
+			{ "Slow", "Two fitting passes, followed by a separate 12-second alignment check.", CalibrationContext::SLOW },
+			{ "Very Slow", "Three fitting passes, followed by a separate 12-second alignment check.", CalibrationContext::VERY_SLOW },
 		};
 		for (int i = 0; i < 3; i++)
 		{
@@ -945,7 +962,7 @@ void UserInterface::RenderWizard()
 			const int total = CalCtx.sequenceSteps > 0 ? CalCtx.sequenceSteps : CalCtx.SequenceStepCount();
 			const int step = std::min(total - 1, std::max(0, CalCtx.sequenceStep));
 			char buf[32];
-			std::snprintf(buf, sizeof buf, "Step %d of %d", step + 1, total);
+			std::snprintf(buf, sizeof buf, "%s %d of %d", CalCtx.validating ? "Check" : "Fit", step + 1, total);
 			counter = buf;
 			title = kSteps[step % kStepCount].title;
 			icon = kSteps[step % kStepCount].icon;
@@ -957,7 +974,7 @@ void UserInterface::RenderWizard()
 			{
 				done = true;
 				counter = "Complete";
-				title = "Done";
+				title = "Alignment check passed";
 				icon = Icon::Check;
 				iconColor = P.green;
 				fillColor = P.green;
@@ -988,8 +1005,19 @@ void UserInterface::RenderWizard()
 
 		// --- body ---
 		{
-			const bool hasMessage = (failed || (running && st == CalibrationState::Sampling && !lastLine.empty() && lastLine.find("samples") != std::string::npos));
-			float bodyH = px(34.0f + 44.0f + 20.0f + 19.0f + 26.0f + 3.0f + 30.0f) + (hasMessage ? px(10.0f + 12.0f) : 0.0f);
+			std::string message;
+			if (failed) message = lastLine;
+			else if (st == CalibrationState::Sampling) message = CalCtx.motionGuidance;
+			else if (done)
+			{
+				const auto &check = CalCtx.calibrationCheck;
+				char summary[224];
+				std::snprintf(summary, sizeof summary, "%.1f mm / %.2f deg RMS agreement\nScale %s: %.4f\nAbsolute tracking accuracy was not measured.",
+					check.positionRmsMm, check.angularRmsDegrees, check.scaleMeasured ? "measured" : "assumed", check.scale);
+				message = summary;
+			}
+			const float messageH = message.empty() ? 0.0f : TextSize(F.regular, 12.0f, message.c_str(), w - 48.0f).y + px(10.0f);
+			float bodyH = px(34.0f + 44.0f + 20.0f + 19.0f + 26.0f + 3.0f + 30.0f) + messageH;
 			ImVec2 p = ImGui::GetCursorScreenPos();
 			ImGui::Dummy(ImVec2(ww, bodyH));
 			float cx = p.x + ww * 0.5f;
@@ -1003,10 +1031,11 @@ void UserInterface::RenderWizard()
 			if (fill > 0.0f)
 				dl->AddRectFilled(ImVec2(bx0, y), ImVec2(bx0 + (bx1 - bx0) * std::min(1.0f, fill), y + px(3.0f)), Col(fillColor), px(2.0f));
 			y += px(3.0f);
-			if (hasMessage)
+			if (!message.empty())
 			{
 				y += px(10.0f);
-				DrawTextCentered(dl, F.regular, 12.0f, ImVec2(cx, y + px(6.0f)), failed ? P.danger : P.textDim, lastLine.c_str());
+				dl->AddText(F.regular, FontPx(12.0f), ImVec2(bx0, y), Col(failed ? P.danger : P.textDim),
+					message.c_str(), nullptr, px(w - 48.0f));
 			}
 		}
 

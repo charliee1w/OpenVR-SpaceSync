@@ -52,3 +52,39 @@ geometry, incomplete quads, oversized geometry, and invalid coordinates.
 These are native regression tests of production logic with simulated hardware
 inputs. They do not establish visual comfort, room-scale tracking quality, or
 installer/runtime integration on a live rig.
+
+## Independent alignment check (trial candidate)
+
+The fit stays private while a fresh 12-second look-around sequence checks it.
+The check never refits the candidate or borrows fitting samples. It requires
+observable motion around two axes and at least ten valid polled poses in each
+of eight 1.5-second segments. Missing coverage allows up to three complete
+checking sequences; contradictory measured agreement aborts even if coverage
+is also insufficient. Tracking loss remains bounded at two seconds.
+
+Both the complete sequence and each segment must meet these mismatch guards:
+
+| Metric | Position | Orientation |
+| --- | --- | --- |
+| RMS | 30 mm | 2 degrees |
+| 95th percentile | 50 mm | 3 degrees |
+| Maximum | 100 mm | 6 degrees |
+
+These are conservative engineering acceptance guards, not measured Quest Pro
+accuracy specifications. They evaluate internal agreement of OpenVR poses
+polled by the overlay, not native timestamp synchronization or external ground
+truth. The UI reports the session's checked RMS agreement and whether scale
+was independently measured or assumed 1.000. Reloaded or manually edited
+profiles have no current check evidence. No profile schema change is needed.
+
+Observed red controls on `cfce5f2`: `fit_remains_private`,
+`heldout_bad_position`, and `heldout_bad_angle` failed because the fit was
+saved before any separate motion check. A further red control,
+`heldout_error_not_retried`, caught contrary evidence being discarded by a
+coverage retry in the initial implementation.
+
+The added production tests cover those failures, good held-out completion,
+per-segment failures hidden by aggregate RMS, missing axes/segments, eventual
+coverage recovery, invalid-pose loss/recovery, cancellation, shutdown saves,
+save-failure rollback, measured versus assumed scale, scale-corrected check
+units, finite/bounded candidates, RMS/tail limits, and targeted turn/nod cues.

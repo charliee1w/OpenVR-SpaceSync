@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cmath>
 #include <optional>
+#include <array>
 
 #include <Dense>
 
@@ -262,6 +263,8 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 static const double ScaleSpreadThreshold = 0.5;
 static const double MinCalibratedScale = 0.97;
 static const double MaxCalibratedScale = 1.03;
+static constexpr double MaxCalibrationPositionMeters = 100.0;
+static constexpr double MaxMountMeters = 2.0;
 
 Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
 {
@@ -314,8 +317,10 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 	return transcm;
 }
 
-static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
+static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale, bool *measured = nullptr)
 {
+	if (measured) *measured = false;
+	if (samples.empty()) return 1.0;
 	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
 	for (auto &sample : samples)
 		centroid += rotation * sample.target.trans;
@@ -329,7 +334,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
-		snprintf(buf, sizeof buf, "Headset scale not estimated (movement spread %.2f m, needs %.1f m of walking), assuming 1. The driver refines it while you play.\n", spread, ScaleSpreadThreshold);
+		snprintf(buf, sizeof buf, "Headset scale assumed 1.000: movement spread %.2f m is below %.1f m.\n", spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
 		return 1.0;
 	}
@@ -370,6 +375,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%) from %.2f m of movement, implied absolute headset scale: %.5f\n",
 		fittedScale, (fittedScale - 1.0) * 100.0, spread, fittedScale / targetModelScale);
 	CalCtx.Log(buf);
+	if (measured) *measured = true;
 	return fittedScale;
 }
 
@@ -406,6 +412,22 @@ static bool HasObservableMotion(const std::vector<Sample> &samples)
 		&& observable(refTranslation, 0) && observable(targetTranslation, 0);
 }
 
+static std::string MissingMotionGuidance(const std::vector<Sample> &samples)
+{
+	// Relative to the first headset pose, local X is nodding and Y is turning.
+	// These cues supplement the sequence; the full information test decides
+	// acceptance and also handles arbitrary tracker mounting orientations.
+	Eigen::Vector3d extent = Eigen::Vector3d::Zero();
+	if (!samples.empty())
+		for (const auto &sample : samples)
+			extent = extent.cwiseMax(RotationVector(samples.front().ref.rot.transpose() * sample.ref.rot).cwiseAbs());
+	if (extent.y() > 0.4 && extent.x() < 0.4)
+		return "Add gentle nods: look up and down.";
+	if (extent.x() > 0.4 && extent.y() < 0.4)
+		return "Add gentle turns: look left and right.";
+	return "Turn left and right, then look up and down.";
+}
+
 static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &samples, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
 {
 	Eigen::Vector3d accum = Eigen::Vector3d::Zero();
@@ -434,7 +456,7 @@ Sample CollectSample(const CalibrationContext &ctx)
 		if (!pose.bPoseIsValid || !pose.bDeviceIsConnected || pose.eTrackingResult != vr::TrackingResult_Running_OK)
 			return false;
 		Pose p(pose.mDeviceToAbsoluteTracking);
-		return p.rot.allFinite() && p.trans.allFinite()
+		return p.rot.allFinite() && p.trans.allFinite() && p.trans.cwiseAbs().maxCoeff() <= MaxCalibrationPositionMeters
 			&& (p.rot.transpose() * p.rot - Eigen::Matrix3d::Identity()).norm() < 0.01
 			&& std::abs(p.rot.determinant() - 1.0) < 0.01;
 	};
@@ -564,6 +586,73 @@ void ComputeRelativeOffset(CalibrationContext &ctx, const std::vector<Sample> &s
 	ctx.relativeTranslation.v[1] = transAccum.y();
 	ctx.relativeTranslation.v[2] = transAccum.z();
 	ctx.validRelativeOffset = true;
+}
+
+struct AlignmentCheck
+{
+	bool passed = false;
+	double positionRms = 0.0, positionP95 = 0.0, positionMax = 0.0;
+	double angularRms = 0.0, angularP95 = 0.0, angularMax = 0.0; // degrees
+};
+
+static bool FiniteCandidate(const CalibrationContext &candidate)
+{
+	const auto &q = candidate.relativeRotation;
+	const Eigen::Quaterniond mount(q.w, q.x, q.y, q.z);
+	const auto &p = candidate.relativeTranslation.v;
+	const Eigen::Vector3d translation(p[0], p[1], p[2]);
+	return candidate.calibratedRotation.allFinite() && candidate.calibratedTranslation.allFinite()
+		&& candidate.calibratedRotation.cwiseAbs().maxCoeff() <= 360.0
+		&& candidate.calibratedTranslation.cwiseAbs().maxCoeff() <= 200.0 * MaxCalibrationPositionMeters
+		&& std::isfinite(candidate.calibratedScale) && candidate.calibratedScale > 0.0 && candidate.calibratedScale <= 2.0
+		&& std::isfinite(candidate.hmdScale) && candidate.hmdScale >= MinCalibratedScale && candidate.hmdScale <= MaxCalibratedScale
+		&& candidate.validRelativeOffset && mount.coeffs().allFinite() && std::abs(mount.norm() - 1.0) < 1e-6
+		&& translation.allFinite() && translation.norm() <= MaxMountMeters;
+}
+
+static AlignmentCheck CheckAlignment(const CalibrationContext &candidate, const std::vector<Sample> &samples)
+{
+	AlignmentCheck result;
+	if (!FiniteCandidate(candidate) || samples.empty()) return result;
+	const auto q = VRRotationQuat(candidate.calibratedRotation);
+	const Eigen::Matrix3d rotation = Eigen::Quaterniond(q.w, q.x, q.y, q.z).toRotationMatrix();
+	const Eigen::Vector3d translation = candidate.calibratedTranslation * 0.01;
+	const auto &mq = candidate.relativeRotation;
+	const Eigen::Quaterniond mountRotation(mq.w, mq.x, mq.y, mq.z);
+	const auto &mp = candidate.relativeTranslation.v;
+	const Eigen::Vector3d mountPosition(mp[0], mp[1], mp[2]);
+	std::vector<double> positionErrors, angularErrors;
+	for (const auto &sample : samples)
+	{
+		if (!sample.valid || !sample.ref.rot.allFinite() || !sample.target.rot.allFinite()
+			|| !sample.ref.trans.allFinite() || !sample.target.trans.allFinite()) return result;
+		const Eigen::Matrix3d trackerRotation = rotation * sample.target.rot;
+		const Eigen::Vector3d predictedPosition = candidate.calibratedScale * (rotation * sample.target.trans)
+			+ translation + trackerRotation * mountPosition;
+		const Eigen::Quaterniond predictedRotation = Eigen::Quaterniond(trackerRotation).normalized() * mountRotation;
+		const double positionError = (predictedPosition - sample.ref.trans / candidate.hmdScale).norm();
+		const double angularError = predictedRotation.angularDistance(Eigen::Quaterniond(sample.ref.rot).normalized()) * 180.0 / EIGEN_PI;
+		if (!std::isfinite(positionError) || !std::isfinite(angularError)) return result;
+		positionErrors.push_back(positionError);
+		angularErrors.push_back(angularError);
+		result.positionRms += positionError * positionError;
+		result.angularRms += angularError * angularError;
+	}
+	result.positionRms = std::sqrt(result.positionRms / samples.size());
+	result.angularRms = std::sqrt(result.angularRms / samples.size());
+	std::sort(positionErrors.begin(), positionErrors.end());
+	std::sort(angularErrors.begin(), angularErrors.end());
+	const size_t p95 = static_cast<size_t>(std::ceil(0.95 * samples.size())) - 1;
+	result.positionP95 = positionErrors[p95];
+	result.angularP95 = angularErrors[p95];
+	result.positionMax = positionErrors.back();
+	result.angularMax = angularErrors.back();
+	// Conservative mismatch guards for the sampled alignment, not ground-truth
+	// accuracy limits. Enforce them per motion segment as well as across the run
+	// so a short bad direction cannot disappear in a long, otherwise good fit.
+	result.passed = result.positionRms <= 0.03 && result.positionP95 <= 0.05 && result.positionMax <= 0.10
+		&& result.angularRms <= 2.0 && result.angularP95 <= 3.0 && result.angularMax <= 6.0;
+	return result;
 }
 
 static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0");
@@ -768,6 +857,11 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID, doubl
 static std::vector<Sample> collectedSamples;
 static int coplanarRetries = 0;
 static std::optional<CalibrationContext> previousCalibration;
+static std::optional<CalibrationContext> candidateCalibration;
+static bool validationNeedsStart = false;
+// Segments use overlay elapsed time only. OpenVR's polled poses do not provide
+// native source timestamps here, so this check cannot certify latency alignment.
+static std::array<std::vector<Sample>, CalibrationContext::SequenceCycle> validationSegments;
 static std::optional<double> invalidSince;
 static constexpr double TrackingLossTimeout = 2.0;
 static constexpr int MaxSamplingWindows = 3;
@@ -785,10 +879,15 @@ void StartCalibration()
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
+	CalCtx.validating = false;
+	CalCtx.motionGuidance = "Turn left and right, then look up and down.";
 	Detection.Clear();
 	collectedSamples.clear();
 	invalidSince.reset();
 	coplanarRetries = 0;
+	candidateCalibration.reset();
+	validationNeedsStart = false;
+	for (auto &segment : validationSegments) segment.clear();
 }
 
 static void AbortAndRestoreProfile(CalibrationContext &ctx)
@@ -809,6 +908,11 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	Detection.Clear();
 	invalidSince.reset();
 	coplanarRetries = 0;
+	candidateCalibration.reset();
+	validationNeedsStart = false;
+	for (auto &segment : validationSegments) segment.clear();
+	ctx.validating = false;
+	ctx.motionGuidance.clear();
 	// Restore state even if the external connection failed during the run.
 	if (rejectedTarget < vr::k_unMaxTrackedDeviceCount)
 		try { ResetAndDisableOffsets(rejectedTarget); }
@@ -880,6 +984,12 @@ void CalibrationTick(double time)
 		return;
 
 	ctx.timeLastTick = time;
+	if (ctx.validating && validationNeedsStart)
+	{
+		// Solver time is not part of the user's new validation sequence.
+		ctx.sequenceStart = time;
+		validationNeedsStart = false;
+	}
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, ctx.devicePoses, vr::k_unMaxTrackedDeviceCount);
 	UpdateSequenceStep(ctx, time);
 	UpdateCalibrationSounds(ctx);
@@ -1049,6 +1159,7 @@ void CalibrationTick(double time)
 			invalidSince = time;
 			ctx.Log("Tracking interrupted; waiting briefly for a valid sample.\n");
 		}
+		ctx.motionGuidance = "Tracking interrupted. Keep the tracker visible.";
 		if (time - *invalidSince >= TrackingLossTimeout)
 		{
 			ctx.Log("Tracking did not recover. Previous calibration restored.\n");
@@ -1064,14 +1175,41 @@ void CalibrationTick(double time)
 	samples.push_back(sample);
 
 	double elapsed = time - ctx.sequenceStart;
-	double total = ctx.SequenceSeconds();
+	double total = ctx.validating ? CalibrationContext::SequenceCycle * CalibrationContext::StepSeconds : ctx.SequenceSeconds();
+	if (ctx.validating)
+	{
+		const size_t segment = static_cast<size_t>(std::clamp(static_cast<int>(elapsed / CalibrationContext::StepSeconds), 0, CalibrationContext::SequenceCycle - 1));
+		validationSegments[segment].push_back(sample);
+	}
+	ctx.motionGuidance = MissingMotionGuidance(samples);
 	CalCtx.Progress((int)(elapsed * 1000.0), (int)(total * 1000.0));
 
 	if (elapsed >= total)
 	{
 		CalCtx.Log("\n");
+		AlignmentCheck check;
+		if (ctx.validating)
+		{
+			if (candidateCalibration) check = CheckAlignment(*candidateCalibration, samples);
+			const bool badSegment = candidateCalibration && std::any_of(validationSegments.begin(), validationSegments.end(),
+				[&](const auto &segment) { return segment.size() >= 10 && !CheckAlignment(*candidateCalibration, segment).passed; });
+			char summary[256];
+			snprintf(summary, sizeof summary, "Independent check: %.1f mm / %.2f deg RMS; %.1f mm / %.2f deg p95.\n",
+				check.positionRms * 1000.0, check.angularRms, check.positionP95 * 1000.0, check.angularP95);
+			ctx.Log(summary);
+			// Missing coverage is recoverable; contradictory evidence is not.
+			// Do not discard a bad direction and retry until a candidate looks good.
+			if (!check.passed || badSegment)
+			{
+				ctx.Log("Independent motion did not match. Check the rigid mount, then retry with smooth motion. Previous calibration restored.\n");
+				AbortAndRestoreProfile(ctx);
+				return;
+			}
+		}
 
-		if (samples.size() < 40 || !HasObservableMotion(samples))
+		const bool segmentCoverage = !ctx.validating || std::all_of(validationSegments.begin(), validationSegments.end(),
+			[](const auto &segment) { return segment.size() >= 10; });
+		if (samples.size() < 40 || !segmentCoverage || !HasObservableMotion(samples))
 		{
 			if (++coplanarRetries >= MaxSamplingWindows)
 			{
@@ -1079,38 +1217,91 @@ void CalibrationTick(double time)
 				AbortAndRestoreProfile(ctx);
 				return;
 			}
-			ctx.Log("Need more rotation around different axes. Starting another look-around sequence...\n");
+			ctx.Log(segmentCoverage ? ctx.motionGuidance + " Starting another sequence...\n"
+				: "Too few valid poses across the check. Repeat the look-around sequence.\n");
 			// Start a real window, including fresh voice cues. Retain the useful
 			// data (bounded above), rather than deleting a quarter every tick.
 			ctx.sequenceStart = time;
 			ctx.sequenceStep = 0;
+			if (ctx.validating)
+			{
+				// A validation attempt must cover a complete new sequence. Never
+				// supplement it with training data or refit the frozen candidate.
+				samples.clear();
+				for (auto &segment : validationSegments) segment.clear();
+			}
 			return;
 		}
 		coplanarRetries = 0;
 
 		try
 		{
-			ctx.calibratedRotation = CalibrateRotation(samples);
+			if (ctx.validating)
+			{
+				auto &candidate = *candidateCalibration;
+				candidate.calibrationCheck.passed = true;
+				candidate.calibrationCheck.positionRmsMm = check.positionRms * 1000.0;
+				candidate.calibrationCheck.angularRmsDegrees = check.angularRms;
+				// Persist the fully checked profile before exposing it to other
+				// overlay/driver paths. Failure leaves the start-of-run snapshot.
+				if (!SaveProfile(candidate))
+					throw std::runtime_error("could not save the checked profile");
+				ctx.calibratedRotation = candidate.calibratedRotation;
+				ctx.calibratedTranslation = candidate.calibratedTranslation;
+				ctx.calibratedScale = candidate.calibratedScale;
+				ctx.targetModelScale = candidate.targetModelScale;
+				ctx.hmdScale = candidate.hmdScale;
+				ctx.relativeRotation = candidate.relativeRotation;
+				ctx.relativeTranslation = candidate.relativeTranslation;
+				ctx.validRelativeOffset = candidate.validRelativeOffset;
+				ctx.targetTrackingSystem = candidate.targetTrackingSystem;
+				ctx.hmdSerial = candidate.hmdSerial;
+				ctx.trackerSerial = candidate.trackerSerial;
+				ctx.calibrationCheck = candidate.calibrationCheck;
+				ctx.validProfile = ctx.lastCalibrationOk = true;
+				ctx.validating = false;
+				ctx.motionGuidance.clear();
+				ctx.Log("Alignment check passed; profile saved. This checks agreement, not absolute tracking accuracy.\n");
+				if (ctx.notificationId != 0)
+				{
+					vr::VRNotifications()->RemoveNotification(ctx.notificationId);
+					ctx.notificationId = 0;
+				}
+				ctx.state = CalibrationState::None;
+				ctx.timeLastScan = time - 1.0;
+				previousCalibration.reset();
+				candidateCalibration.reset();
+				samples.clear();
+				for (auto &segment : validationSegments) segment.clear();
+				return;
+			}
 
-			Eigen::Vector3d eulerRad = ctx.calibratedRotation * EIGEN_PI / 180.0;
+			CalibrationContext candidate = ctx;
+			candidate.calibrationCheck = {};
+			candidate.calibratedRotation = CalibrateRotation(samples);
+
+			Eigen::Vector3d eulerRad = candidate.calibratedRotation * EIGEN_PI / 180.0;
 			Eigen::Matrix3d calRot =
 				(Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
 				 Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
 				 Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
 
 			double calScale = 1.0;
-			ctx.calibratedScale = calScale;
-			ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
-			if (ctx.targetModelScale <= 0.0)
-				ctx.targetModelScale = 1.0;
+			candidate.calibratedScale = calScale;
+			candidate.targetModelScale = GetLighthouseModelScale(ctx.targetID);
+			if (candidate.targetModelScale <= 0.0)
+				candidate.targetModelScale = 1.0;
 
-			ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
+			candidate.hmdScale = EstimateHmdSpaceScale(samples, calRot, candidate.targetModelScale, &candidate.calibrationCheck.scaleMeasured);
+			candidate.calibrationCheck.scale = candidate.hmdScale;
 
+			// Only the private training buffer is rescaled. Validation is collected
+			// afterward from fresh, unmodified OpenVR poses.
 			for (auto &sample : samples)
-				sample.ref.trans /= ctx.hmdScale;
+				sample.ref.trans /= candidate.hmdScale;
 
-			ctx.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
-			Eigen::Vector3d calTransM = ctx.calibratedTranslation * 0.01;
+			candidate.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
+			Eigen::Vector3d calTransM = candidate.calibratedTranslation * 0.01;
 
 			Eigen::Vector3d hmdToTarget = ComputeRefToTargetOffset(samples, calRot, calTransM, calScale);
 			double rmsError = RetargetingErrorRMS(samples, hmdToTarget, calRot, calTransM, calScale);
@@ -1119,34 +1310,28 @@ void CalibrationTick(double time)
 			snprintf(buf2, sizeof buf2, "Calibration residual error (RMS): %.1f mm\n", rmsError * 1000.0);
 			CalCtx.Log(buf2);
 
-			// TODO: this is an problem for future considering automatic calibration fixing.
-			if (!std::isfinite(rmsError) || !ctx.calibratedRotation.allFinite() || !ctx.calibratedTranslation.allFinite() || rmsError > 0.1)
+			ComputeRelativeOffset(candidate, samples, calRot, calTransM, calScale);
+			if (!std::isfinite(rmsError) || !FiniteCandidate(candidate) || rmsError > 0.1)
 			{
 				CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
 				AbortAndRestoreProfile(ctx);
 				return;
 			}
 
-			ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
-
-			ctx.targetTrackingSystem = pendingIdentity.trackingSystem;
-			ctx.hmdSerial = pendingIdentity.hmdSerial;
-			ctx.trackerSerial = pendingIdentity.trackerSerial;
-			ctx.validProfile = true;
-			if (!SaveProfile(ctx))
-				throw std::runtime_error("could not save the new profile; previous calibration restored");
-			ctx.lastCalibrationOk = true;
-			CalCtx.Log("Finished calibration, profile saved\n");
-
-			if (CalCtx.notificationId != 0) {
-				vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);
-				CalCtx.notificationId = 0;
-			}
-
-
-			ctx.state = CalibrationState::None;
-			previousCalibration.reset();
+			candidate.targetTrackingSystem = pendingIdentity.trackingSystem;
+			candidate.hmdSerial = pendingIdentity.hmdSerial;
+			candidate.trackerSerial = pendingIdentity.trackerSerial;
+			candidate.validProfile = true;
+			candidateCalibration = std::move(candidate);
 			samples.clear();
+			ctx.validating = true;
+			validationNeedsStart = true;
+			ctx.sequenceStart = time;
+			ctx.sequenceSteps = CalibrationContext::SequenceCycle;
+			ctx.sequenceStep = 0;
+			ctx.motionGuidance = "Repeat the look-around sequence to check alignment.";
+			ctx.Progress(0, static_cast<int>(CalibrationContext::SequenceCycle * CalibrationContext::StepSeconds * 1000.0));
+			ctx.Log("Fit complete. Checking a separate motion sequence before saving...\n");
 		}
 		catch (const std::runtime_error &e)
 		{

@@ -43,6 +43,18 @@ struct CalibrationContext
 	bool enabled = false;
 	bool validProfile = false;
 	bool lastCalibrationOk = false;   // did the last calibration run succeed
+	// Session-only evidence from a separate motion sequence. A saved/edited
+	// profile has no such evidence; this is not a claim of absolute accuracy.
+	struct CalibrationCheck
+	{
+		bool passed = false;
+		bool scaleMeasured = false;
+		double scale = 1.0;
+		double positionRmsMm = 0.0;
+		double angularRmsDegrees = 0.0;
+	} calibrationCheck;
+	bool validating = false;
+	std::string motionGuidance;
 	protocol::DriverStatus driverStatus = {};
 	bool refinementDirty = false;
 	double timeRefinementSaved = 0.0;
@@ -105,9 +117,12 @@ struct CalibrationContext
 		enabled = false;
 		validProfile = false;
 		continuousSync = false;
+		calibrationCheck = {};
+		validating = false;
+		motionGuidance.clear();
 	}
 
-	// The look-around sequence drives both the wizard and the voice cues, one second per step.
+	// The look-around sequence drives both the wizard and the voice cues.
 	static const int SequenceCycle = 8;
 	static constexpr double StepSeconds = 1.5;
 
