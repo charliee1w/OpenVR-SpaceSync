@@ -4,6 +4,7 @@
 #pragma once
 
 #include "PoseMath.h"
+#include "ObservableRefinement.h"
 
 #include <cstdint>
 #include <cmath>
@@ -667,7 +668,10 @@ struct ClockAligner
 
 	void addHmdPose(double t, const vr::HmdQuaternion_t& rotation, const vr::HmdVector3d_t& position) { push(hmdPoses, hmd, t, rotation, position); }
 
-	void noteHmdDiscontinuity() { hmdPoses.clear(); }
+	// Keep the last reliable clock estimate, but never interpolate or vote
+	// with velocity samples from before an invalid-pose interval.
+	void noteHmdDiscontinuity() { hmdPoses.clear(); hmd.clear(); }
+	void noteTrackerDiscontinuity() { trackerPoses.clear(); tracker.clear(); }
 
 	void addTrackerPose(double t, const vr::HmdQuaternion_t& rotation, const vr::HmdVector3d_t& position) { push(trackerPoses, tracker, t, rotation, position); }
 
@@ -700,7 +704,7 @@ private:
 			const Pose& last = ring.poses[(ring.next - 1 + 16) % 16];
 			double span = t - last.time;
 			if (span <= 0.0005) return;
-			if (span > 0.1) ring.clear();
+			if (span > 0.1) { ring.clear(); series.clear(); }
 		}
 		Pose& p = ring.poses[ring.next];
 		p.time = t; p.rotation = rotation; p.position = position;
@@ -715,6 +719,7 @@ private:
 		if (ang > 20.0 || lin > 6.0)
 		{
 			ring.clear();
+			series.clear();
 			return;
 		}
 		series.add(0.5 * (t + old.time), ang, lin);
@@ -903,26 +908,30 @@ struct MountRefiner
 			return cost < 0.0 ? 0.0 : cost;
 		}
 
-		bool solveRotation(vr::HmdVector3d_t& eps, double obs[3], double ridge) const
+		bool solveRotation(vr::HmdVector3d_t& eps, double obs[3], double ridge, double obsMin) const
 		{
 			double N = weight;
+			if (!(N > 0.0)) return false;
 			vr::HmdVector3d_t a = sumR.mulTransposed({ 0, 1, 0 });
-			double A[9], b[3], x[3];
+			Eigen::Matrix3d A;
+			Eigen::Vector3d b, prior(eps.v[0], eps.v[1], eps.v[2]), result;
 			for (int i = 0; i < 3; i++)
 			{
 				obs[i] = 1.0 - a.v[i] * a.v[i] / (N * N);
 				for (int j = 0; j < 3; j++)
-					A[i * 3 + j] = (i == j ? N + ridge * N : 0.0) - a.v[i] * a.v[j] / N;
-				b[i] = sumRtM.v[i] - a.v[i] * sumM.v[1] / N;
+					A(i, j) = (i == j ? 1.0 : 0.0) - a.v[i] * a.v[j] / (N * N);
+				b[i] = (sumRtM.v[i] - a.v[i] * sumM.v[1] / N) / N;
 			}
-			if (!solveLinearSystem(3, A, b, x)) return false;
-			eps = { x[0], x[1], x[2] };
+			if (!detail::observableUpdate<3>(A, b, prior, Eigen::Vector3d::Constant(obsMin), Eigen::Vector3d::Constant(ridge), result)) return false;
+			eps = { result[0], result[1], result[2] };
 			return true;
 		}
 
-		bool solveTranslation(vr::HmdVector3d_t& delta, double& kappa, double obs[3], double& obsScale, double ridge, double spreadRidge) const
+		bool solveTranslation(vr::HmdVector3d_t& delta, double& kappa, double obs[3], double& obsScale,
+			double ridge, double spreadRidge, double obsMin, double obsScaleMin, bool scaleEnabled) const
 		{
 			double N = weight;
+			if (!(N > 0.0)) return false;
 			for (int i = 0; i < 3; i++)
 			{
 				double col = 0.0;
@@ -931,7 +940,7 @@ struct MountRefiner
 			}
 			obsScale = (sumXX - vecDot(sumX, sumX) / N) / N;
 
-			double B[25], c[5], v[5], Cm[15];
+			double B[25], c[5], Cm[15];
 			for (int i = 0; i < 3; i++)
 			{
 				for (int j = 0; j < 3; j++) Cm[i * 5 + j] = sumR.m[i][j];
@@ -954,19 +963,48 @@ struct MountRefiner
 					for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * Cm[k * 5 + j];
 					B[i * 5 + j] -= dotc / N;
 				}
-			for (int i = 0; i < 3; i++) B[i * 5 + i] += ridge * N;
-			B[3 * 5 + 3] += spreadRidge * N;
-			B[4 * 5 + 4] += spreadRidge * N;
-			double rhs[5] = { sumRtE.v[0], sumRtE.v[1], sumRtE.v[2], sumXE, sumYXE };
+			double fullRhs[5] = { sumRtE.v[0], sumRtE.v[1], sumRtE.v[2], sumXE, sumYXE };
 			for (int i = 0; i < 5; i++)
 			{
 				double dotc = 0.0;
 				for (int k = 0; k < 3; k++) dotc += Cm[k * 5 + i] * sumE.v[k];
-				c[i] = rhs[i] - dotc / N;
+				c[i] = fullRhs[i] - dotc / N;
 			}
-			if (!solveLinearSystem(5, B, c, v)) return false;
-			delta = { v[0], v[1], v[2] };
-			kappa = v[3];
+			// Remove the nuisance yaw before testing mount/scale observability.
+			// A yaw ridge would make a confounded mount direction look measurable.
+			Eigen::Matrix4d information;
+			Eigen::Vector4d rhs;
+			const double yawInformation = B[24];
+			for (int i = 0; i < 4; ++i)
+			{
+				rhs[i] = c[i] / N;
+				for (int j = 0; j < 4; ++j) information(i, j) = B[i * 5 + j] / N;
+				if (yawInformation > 1e-12 * N)
+				{
+					rhs[i] -= B[i * 5 + 4] * c[4] / (yawInformation * N);
+					for (int j = 0; j < 4; ++j)
+						information(i, j) -= B[i * 5 + 4] * B[4 * 5 + j] / (yawInformation * N);
+				}
+			}
+			Eigen::Vector4d prior(delta.v[0], delta.v[1], delta.v[2], kappa), result = prior;
+			if (scaleEnabled)
+			{
+				if (!detail::observableUpdate<4>(information, rhs, prior,
+					Eigen::Vector4d(obsMin, obsMin, obsMin, obsScaleMin),
+					Eigen::Vector4d(ridge, ridge, ridge, spreadRidge), result)) return false;
+			}
+			else
+			{
+				// A disabled scale remains fixed, and its known contribution stays
+				// in the translation residual rather than becoming a free parameter.
+				Eigen::Vector3d translationResult;
+				if (!detail::observableUpdate<3>(information.topLeftCorner<3, 3>(),
+					rhs.head<3>() - information.topRightCorner<3, 1>() * kappa, prior.head<3>(),
+					Eigen::Vector3d::Constant(obsMin), Eigen::Vector3d::Constant(ridge), translationResult)) return false;
+				result.head<3>() = translationResult;
+			}
+			delta = { result[0], result[1], result[2] };
+			kappa = result[3];
 			return true;
 		}
 	};
@@ -1067,37 +1105,51 @@ struct MountRefiner
 		current.add(R, m, e, x, yx, w);
 	}
 
+	static double boundedStepFraction(const vr::HmdVector3d_t& prior, const vr::HmdVector3d_t& step, double limit)
+	{
+		if (vecNorm(vecAdd(prior, step)) <= limit) return 1.0;
+		const double a = vecDot(step, step), b = 2.0 * vecDot(prior, step);
+		const double c = vecDot(prior, prior) - limit * limit;
+		if (a <= 0.0 || c > 1e-12) return 0.0;
+		const double discriminant = b * b - 4.0 * a * c;
+		if (discriminant < 0.0) return 0.0;
+		const double root = std::sqrt(discriminant);
+		const double fraction = b > 0.0 ? -2.0 * c / (b + root) : (-b + root) / (2.0 * a);
+		return fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction);
+	}
+
 	bool evaluate(Delta& out)
 	{
 		out = Delta();
 		if (current.weight < blockSeconds) return false;
 
-		vr::HmdVector3d_t epsSol = { 0, 0, 0 }, delSol = { 0, 0, 0 };
-		double kapSol = 0.0;
-		bool okR = current.solveRotation(epsSol, obsRotation, ridge);
-		bool okT = current.solveTranslation(delSol, kapSol, obsTranslation, obsScale, ridge, spreadRidge);
+		vr::HmdVector3d_t epsSol = rotation, delSol = translation;
+		double kapSol = scale;
+		bool okR = current.solveRotation(epsSol, obsRotation, ridge, obsMin);
+		bool okT = current.solveTranslation(delSol, kapSol, obsTranslation, obsScale, ridge, spreadRidge, obsMin, obsScaleMin, scaleEnabled);
 		solves++;
 
-		vr::HmdVector3d_t candR = rotation, candT = translation;
-		double candS = scale;
-		if (okR)
-			for (int i = 0; i < 3; i++)
-				if (obsRotation[i] > obsMin) candR.v[i] = epsSol.v[i];
-		if (okT)
-		{
-			for (int i = 0; i < 3; i++)
-				if (obsTranslation[i] > obsMin) candT.v[i] = delSol.v[i];
-			if (scaleEnabled && obsScale > obsScaleMin) candS = kapSol;
-		}
+		vr::HmdVector3d_t candR = okR ? epsSol : rotation, candT = okT ? delSol : translation;
+		double candS = okT ? kapSol : scale;
 		solvedRotation = candR;
 		solvedTranslation = candT;
 		solvedScale = candS;
 
 		double rn = vecNorm(candR), tn = vecNorm(candT);
-		if (rn > maxRotation) candR = vecScale(candR, maxRotation / rn);
-		if (tn > maxTranslation) candT = vecScale(candT, maxTranslation / tn);
-		if (candS > maxScale) candS = maxScale;
-		if (candS < -maxScale) candS = -maxScale;
+		// Bound the proposed step, not the whole state: rescaling the prior
+		// would erase its unobservable components. Translation and scale share
+		// one step fraction because a measured direction can couple both.
+		const auto rotationStep = vecSub(candR, rotation);
+		candR = vecAdd(rotation, vecScale(rotationStep, boundedStepFraction(rotation, rotationStep, maxRotation)));
+		const auto translationStep = vecSub(candT, translation);
+		const double scaleStep = candS - scale;
+		double fraction = boundedStepFraction(translation, translationStep, maxTranslation);
+		if (candS > maxScale && scaleStep > 0.0)
+			fraction = std::fmin(fraction, std::fmax(0.0, (maxScale - scale) / scaleStep));
+		if (candS < -maxScale && scaleStep < 0.0)
+			fraction = std::fmin(fraction, std::fmax(0.0, (-maxScale - scale) / scaleStep));
+		candT = vecAdd(translation, vecScale(translationStep, fraction));
+		candS = scale + scaleStep * fraction;
 
 		lastHadReference = previous.weight >= blockSeconds * 0.5;
 		lastAcceptedTranslation = false;
@@ -1118,12 +1170,13 @@ struct MountRefiner
 			{
 				vr::HmdVector3d_t step = vecSub(candT, translation);
 				double sn = vecNorm(step);
-				if (sn > stepTranslation) step = vecScale(step, stepTranslation / sn);
+				double ds = candS - scale;
+				double stepFraction = sn > stepTranslation ? stepTranslation / sn : 1.0;
+				if (std::fabs(ds) > stepScale) stepFraction = std::fmin(stepFraction, stepScale / std::fabs(ds));
+				step = vecScale(step, stepFraction);
+				ds *= stepFraction;
 				translation = vecAdd(translation, step);
 				out.translation = step;
-				double ds = candS - scale;
-				if (ds > stepScale) ds = stepScale;
-				if (ds < -stepScale) ds = -stepScale;
 				scale += ds;
 				out.scale = ds;
 				suspected = tn > suspectTranslation;

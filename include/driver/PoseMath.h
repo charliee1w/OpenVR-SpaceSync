@@ -119,18 +119,36 @@ inline double quaternionAngleRad(const vr::HmdQuaternion_t& q) {
 template < class T >
 inline vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 {
-	vr::HmdQuaternion_t q{};
+	double m[3][3];
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+		{
+			m[i][j] = matrix.m[i][j];
+			if (!std::isfinite(m[i][j])) return { 1, 0, 0, 0 };
+		}
 
-	q.w = sqrt(fmax(0, 1 + matrix.m[0][0] + matrix.m[1][1] + matrix.m[2][2])) / 2;
-	q.x = sqrt(fmax(0, 1 + matrix.m[0][0] - matrix.m[1][1] - matrix.m[2][2])) / 2;
-	q.y = sqrt(fmax(0, 1 - matrix.m[0][0] + matrix.m[1][1] - matrix.m[2][2])) / 2;
-	q.z = sqrt(fmax(0, 1 - matrix.m[0][0] - matrix.m[1][1] + matrix.m[2][2])) / 2;
-
-	q.x = copysign(q.x, matrix.m[2][1] - matrix.m[1][2]);
-	q.y = copysign(q.y, matrix.m[0][2] - matrix.m[2][0]);
-	q.z = copysign(q.z, matrix.m[1][0] - matrix.m[0][1]);
-
-	return q;
+	// Recover the largest quaternion component first. At a half-turn the
+	// antisymmetric differences vanish, so they cannot determine axis signs;
+	// the symmetric sums below retain the relative signs of the other axes.
+	double diagonal[4] = {
+		1 + m[0][0] + m[1][1] + m[2][2],
+		1 + m[0][0] - m[1][1] - m[2][2],
+		1 - m[0][0] + m[1][1] - m[2][2],
+		1 - m[0][0] - m[1][1] + m[2][2]
+	};
+	int largest = 0;
+	for (int i = 1; i < 4; ++i)
+		if (diagonal[i] > diagonal[largest]) largest = i;
+	const double s = 2.0 * std::sqrt(diagonal[largest]);
+	vr::HmdQuaternion_t q;
+	switch (largest)
+	{
+	case 0: q = { 0.25 * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s }; break;
+	case 1: q = { (m[2][1] - m[1][2]) / s, 0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s }; break;
+	case 2: q = { (m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s }; break;
+	default: q = { (m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s }; break;
+	}
+	return quaternionNormalize(q);
 }
 
 inline vr::HmdVector3d_t vecAdd(const vr::HmdVector3d_t& a, const vr::HmdVector3d_t& b) {
