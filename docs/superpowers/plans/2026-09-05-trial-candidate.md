@@ -59,8 +59,8 @@ Owner: primary agent. Files: new bounded pose-capture helper/tests, diagnostic t
 - [x] Verify disabled mode, malformed input, queue saturation, startup/write failures, shutdown and bounded files.
 - [x] Integrate capture without logging private profiles or device serials; provide an offline inspection tool.
 - [x] Review cross-component timing, reference and lifetime contracts; repair concrete review findings.
-- [ ] Build full x64 Release overlay/driver and installer, run all CTest groups in Release and Debug, inspect the packaged file set.
-- [ ] Produce a source patch, checksummed trial installer and clear install/rollback/trial instructions. Commit and update the existing fork branch.
+- [x] Build full x64 Release overlay/driver and installer, run all CTest groups in Release and Debug, inspect the packaged file set.
+- [x] Produce a source patch, checksummed trial installer and clear install/rollback/trial instructions. Commit and update the existing fork branch.
 
 ## Verification commands
 
