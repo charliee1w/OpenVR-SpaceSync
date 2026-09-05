@@ -47,6 +47,7 @@ Var vrRuntimePath
 ; Interface Settings
 
 !define MUI_ABORTWARNING
+!define MUI_CUSTOMFUNCTION_ABORT RestoreLegacyOnAbort
 
 ;--------------------------------
 ; Pages
@@ -135,7 +136,7 @@ Function .onInstFailed
     SetErrorLevel 1
 FunctionEnd
 
-Function .onUserAbort
+Function RestoreLegacyOnAbort
     Call .onInstFailed
 FunctionEnd
 

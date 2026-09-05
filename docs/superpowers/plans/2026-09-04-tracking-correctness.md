@@ -23,41 +23,41 @@
 
 Owner: driver worker. Files: `ServerTrackedDeviceProvider.{h,cpp}`, optional focused driver helpers, `tests/driver/`.
 
-- [ ] Add tests for mixed-generation state, disable/reset transitions, invalid history ingress, reference scale, and prediction/transform commutation.
-- [ ] Demonstrate failures on the original implementation.
-- [ ] Synchronize complete callback/configuration transactions without holding a lock over external pose acquisition; protect cross-device alignment reads.
-- [ ] Reject invalid tracker timing samples, including differencing across gaps, using the estimator worker's history-reset API.
-- [ ] Apply calibration scale to head reference and linear velocities consistently.
-- [ ] Run tests and commit owned paths. Coordinate `Cleanup()` with primary owner's IPC lifecycle work.
+- [x] Add tests for mixed-generation state, disable/reset transitions, invalid history ingress, reference scale, and prediction/transform commutation.
+- [x] Demonstrate failures on the original implementation.
+- [x] Synchronize complete callback/configuration transactions without holding a lock over external pose acquisition; protect cross-device alignment reads.
+- [x] Reject invalid tracker timing samples, including differencing across gaps, using the estimator worker's history-reset API.
+- [x] Apply calibration scale to head reference and linear velocities consistently.
+- [x] Run tests and commit owned paths. Coordinate `Cleanup()` with primary owner's IPC lifecycle work.
 
 ### Estimator observability, timing history, and rotation math — F6, F7 core, F10
 
 Owner: estimator worker. Files: `AlignmentEstimator.h`, `PoseMath.h`, focused numerical helpers, `tests/estimator/`.
 
-- [ ] Turn native review probes into assertions for nullspace preservation, valid timing recovery, and mixed-axis half-turn round trips.
-- [ ] Demonstrate original failures.
-- [ ] Update observable eigenspaces while preserving prior nullspace information; inspect translation/scale coupling.
-- [ ] Add an explicit invalid-history boundary API, coordinated with driver worker.
-- [ ] Use a stable matrix-to-quaternion conversion around half-turns.
-- [ ] Verify controls and commit owned paths.
+- [x] Turn native review probes into assertions for nullspace preservation, valid timing recovery, and mixed-axis half-turn round trips.
+- [x] Demonstrate original failures.
+- [x] Update observable eigenspaces while preserving prior nullspace information; inspect translation/scale coupling.
+- [x] Add an explicit invalid-history boundary API, coordinated with driver worker.
+- [x] Use a stable matrix-to-quaternion conversion around half-turns.
+- [x] Verify controls and commit owned paths.
 
 ### Calibration transactions and profile safety — F2–F5
 
 Owner: calibration worker. Files: `Calibration.{h,cpp}`, `Configuration.{h,cpp}`, focused overlay helpers, `tests/calibration/`.
 
-- [ ] Add native tests for replacing tracker A with B then losing a sample, parser bounds/types, solvable two-axis motion, single-axis rejection, and meaningful retry windows.
-- [ ] Demonstrate original failures.
-- [ ] Keep prior calibration coherent through cancellation/failure; tolerate bounded transient invalid samples.
-- [ ] Validate profile data before committing it, including complete finite chaperone quads.
-- [ ] Base motion observability on physical rotation/translation constraints; collect new data before retrying.
-- [ ] Run tests and commit owned paths.
+- [x] Add native tests for replacing tracker A with B then losing a sample, parser bounds/types, solvable two-axis motion, single-axis rejection, and meaningful retry windows.
+- [x] Demonstrate original failures.
+- [x] Keep prior calibration coherent through cancellation/failure; tolerate bounded transient invalid samples.
+- [x] Validate profile data before committing it, including complete finite chaperone quads.
+- [x] Base motion observability on physical rotation/translation constraints; collect new data before retrying.
+- [x] Run tests and commit owned paths.
 
 ### IPC lifecycle, installer, build integration — F11, F12, S1
 
 Owner: primary agent. Files: `IPCServer.{h,cpp}`, driver `Cleanup()`, installer, CMake integration, `tests/ipc/`, packaging tests and documentation.
 
-- [ ] Add Windows named-pipe lifecycle tests using a unique pipe, with no live VR connection, covering empty/active/pending I/O and rapid shutdown.
-- [ ] Demonstrate shutdown/lifecycle failures, then make startup/stop/join/I/O ownership deterministic and keep logging alive until producers stop.
+- [x] Add Windows named-pipe lifecycle tests using a unique pipe, with no live VR connection, covering empty/active/pending I/O and rapid shutdown.
+- [x] Demonstrate shutdown/lifecycle failures, then make startup/stop/join/I/O ownership deterministic and keep logging alive until producers stop.
 - [ ] Resolve and validate runtime path before removing helpers; check registration command outcomes.
 - [ ] Handle leftover legacy driver by a reversible settings change in the installer, with explicit user-facing migration choice; never recursively delete arbitrary discovered driver directories.
 - [ ] Integrate all native regression targets in CTest; compile driver and overlay and build the installer without executing it.

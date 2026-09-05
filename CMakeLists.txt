@@ -24,6 +24,9 @@ find_package(OpenVR REQUIRED)
 
 # Include rest of the CMake bindings
 add_subdirectory(3rdparty)
+target_compile_definitions(Eigen INTERFACE
+    _HAS_DEPRECATED_NEGATORS=1
+    _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
 
 message(STATUS "ENABLE_VULKAN_VALIDATION = ${ENABLE_VULKAN_VALIDATION}")
 
@@ -46,12 +49,6 @@ target_include_directories(SpaceSync
     PRIVATE
         "${CMAKE_SOURCE_DIR}/include/overlay"
         "${CMAKE_SOURCE_DIR}/include/shared"
-)
-
-target_compile_definitions(SpaceSync
-    PRIVATE
-        _HAS_DEPRECATED_NEGATORS=1
-        _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
 )
 
 if (ENABLE_VULKAN_VALIDATION)
@@ -97,7 +94,13 @@ target_include_directories(driver_spacesync PRIVATE
 target_link_libraries(driver_spacesync PRIVATE
     OpenVR::Driver
     MinHook
+    Eigen
 )
 
 set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 set_target_properties(driver_spacesync PROPERTIES PREFIX "")
+
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

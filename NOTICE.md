@@ -31,3 +31,13 @@ Starting point was OpenVR-SpaceOverride commit `6604e42`. Since then:
 
 Every source file I touched or added has a "Modified by" or "Added by" line under its SPDX header.
 The full history is in this repo's git log.
+
+## Tracking correctness fork
+
+Further modifications by charliee1w began on 2026-09-04, based on SpaceSync
+commit `be88d36ecbaa6ee6e42cb87d06c601e2229b166f` (upstream 1.3.2).
+This fork repairs calibration transactions and profile parsing, estimator
+observability and timing boundaries, pose transforms and concurrent state access,
+IPC and hook shutdown, and installer lifecycle and legacy-driver migration.
+It adds native regression tests and retains the AGPL-3.0-only license.
+See `docs/tracking-correctness.md` and the git history for scope and validation.

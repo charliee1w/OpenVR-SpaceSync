@@ -3,6 +3,11 @@
 
 # SpaceSync
 
+> **Tracking correctness fork:** this branch is based on upstream 1.3.2 and
+> includes calibration, estimator, pose-state, shutdown, and installer fixes.
+> See [changes and verification](docs/tracking-correctness.md). Native regression
+> tests pass; tracking quality in a live VRChat session has not been measured.
+
 > **Heads up:** OpenVR-SpaceSync is a modified version of
 > [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride) by Nyabsi (Copyright (C) 2026 Nyabsi,
 > AGPL-3.0). Modifications to the original work were made beginning on 2026-08-23 by Shinyflvres.
