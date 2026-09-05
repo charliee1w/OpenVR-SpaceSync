@@ -35,3 +35,8 @@ passed. After repair, all five groups pass with MSVC Release builds.
 The timing and refinement fixtures are synthetic mathematical regressions. Their
 injected timing offsets and correction errors are not measurements of a headset
 or a played VR session.
+
+The additional `spacesync_history_tests` executable covers bounded timestamped
+rigid-pair interpolation. See [PoseHistory.md](PoseHistory.md) for its API,
+regressions, deterministic comparison against latest-pose extrapolation, and
+the limits of that evidence.
