@@ -319,6 +319,26 @@ void HeldOutMissingSegment() {
     Require(CalCtx.state == CalibrationState::None && CalCtx.trackerSerial == "A" && saves == 0,
         "partial validation sequences were accepted without coverage of every segment");
 }
+void HeldOutSparseContradiction() {
+    for (int validCount = 1; validCount < 10; ++validCount) {
+        Reset();
+        int i = FitCandidate(), segmentSamples = 0;
+        const int end = i + 210;
+        for (++i; i <= end && CalCtx.state == CalibrationState::Sampling; ++i) {
+            SetMotion(i, true);
+            const double elapsed = (0.1 + i * 0.06) - CalCtx.sequenceStart;
+            if (elapsed >= 6.0 && elapsed < 7.5) {
+                if (segmentSamples++ < validCount)
+                    system.poses[0].mDeviceToAbsoluteTracking.m[0][3] += 0.04f;
+                else system.poses[1].bPoseIsValid = false;
+            }
+            CalibrationTick(0.1 + i * 0.06);
+        }
+        Require(CalCtx.state == CalibrationState::None && !CalCtx.lastCalibrationOk && saves == 0
+            && CalCtx.trackerSerial == "A" && CalCtx.relativeTranslation.v[0] == 0.01,
+            "a bad segment with 1-9 valid poses was discarded as insufficient coverage");
+    }
+}
 void RetryWaitAndRecover() {
     Reset();
     for (int i = 1; i <= 215; ++i) Tick(0.1 + i * 0.06, i, false);
@@ -568,6 +588,7 @@ int main(int argc, char** argv) {
         {"heldout_error_not_retried", test::HeldOutErrorIsNotRetried},
         {"heldout_tracking_loss", test::HeldOutTrackingLoss}, {"heldout_segment_failure", test::HeldOutSegmentFailure},
         {"heldout_cancel", test::HeldOutCancel}, {"heldout_missing_segment", test::HeldOutMissingSegment},
+        {"heldout_sparse_contradiction", test::HeldOutSparseContradiction},
         {"scale_measured_fallback", test::MeasuredScaleAndFallback}, {"alignment_bounds_tails", test::AlignmentBoundsAndTailErrors},
         {"adaptive_guidance", test::AdaptiveMotionGuidance},
     };

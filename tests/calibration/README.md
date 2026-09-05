@@ -83,6 +83,12 @@ saved before any separate motion check. A further red control,
 `heldout_error_not_retried`, caught contrary evidence being discarded by a
 coverage retry in the initial implementation.
 
+`heldout_sparse_contradiction` exercises the intersection of these gates: each
+run has one bad segment containing only 1 through 9 valid poses, with tracking
+loss for the rest of that segment and good data elsewhere. Every nonempty
+segment participates in contradiction rejection; ten poses are required only
+for accepting its coverage. Sparse contrary evidence must not be retried away.
+
 The added production tests cover those failures, good held-out completion,
 per-segment failures hidden by aggregate RMS, missing axes/segments, eventual
 coverage recovery, invalid-pose loss/recovery, cancellation, shutdown saves,

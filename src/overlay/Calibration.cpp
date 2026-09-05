@@ -1192,7 +1192,7 @@ void CalibrationTick(double time)
 		{
 			if (candidateCalibration) check = CheckAlignment(*candidateCalibration, samples);
 			const bool badSegment = candidateCalibration && std::any_of(validationSegments.begin(), validationSegments.end(),
-				[&](const auto &segment) { return segment.size() >= 10 && !CheckAlignment(*candidateCalibration, segment).passed; });
+				[&](const auto &segment) { return !segment.empty() && !CheckAlignment(*candidateCalibration, segment).passed; });
 			char summary[256];
 			snprintf(summary, sizeof summary, "Independent check: %.1f mm / %.2f deg RMS; %.1f mm / %.2f deg p95.\n",
 				check.positionRms * 1000.0, check.angularRms, check.positionP95 * 1000.0, check.angularP95);
