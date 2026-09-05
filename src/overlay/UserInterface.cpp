@@ -321,8 +321,9 @@ UserInterface::WindowAction UserInterface::RenderTitleBar()
 	dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, h), Col(P.titleBar));
 	dl->AddRectFilled(ImVec2(0, h - 1.0f), ImVec2(W, h), Col(P.border));
 
-	ImVec2 ts = TextSize(F.semibold, 12.5f, "SpaceSync");
-	DrawText(dl, F.semibold, 12.5f, ImVec2(px(14.0f), (h - ts.y) * 0.5f), P.textTitle, "SpaceSync");
+	constexpr const char* title = "SpaceSync " SPACECAL_VERSION_STRING;
+	ImVec2 ts = TextSize(F.semibold, 12.5f, title);
+	DrawText(dl, F.semibold, 12.5f, ImVec2(px(14.0f), (h - ts.y) * 0.5f), P.textTitle, title);
 
 	WindowAction action = WindowAction::None;
 	const float bw = px(TitleBarButtonWidth), bh = px(32.0f);
