@@ -1,0 +1,8 @@
+add_executable(pose_capture_tests pose_capture_tests.cpp ${PROJECT_SOURCE_DIR}/src/driver/PoseCapture.cpp)
+target_include_directories(pose_capture_tests PRIVATE ${PROJECT_SOURCE_DIR}/include/driver ${PROJECT_SOURCE_DIR}/3rdparty/OpenVR/headers)
+target_compile_definitions(pose_capture_tests PRIVATE NOMINMAX)
+add_test(NAME pose_capture COMMAND pose_capture_tests)
+set_tests_properties(pose_capture PROPERTIES TIMEOUT 15)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME pose_capture_inspection COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_inspect_capture.py)
+add_test(NAME pose_capture_roundtrip COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/capture_roundtrip.py $<TARGET_FILE:pose_capture_tests>)

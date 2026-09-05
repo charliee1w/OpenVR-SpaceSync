@@ -1,0 +1,5 @@
+add_executable(logging_lifecycle_tests logging_lifecycle_tests.cpp ${PROJECT_SOURCE_DIR}/src/driver/Logging.cpp)
+target_include_directories(logging_lifecycle_tests PRIVATE ${PROJECT_SOURCE_DIR}/include/driver)
+foreach(scenario failed-close stderr)
+    add_test(NAME logging_${scenario} COMMAND logging_lifecycle_tests ${scenario})
+endforeach()

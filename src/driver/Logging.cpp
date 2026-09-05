@@ -5,10 +5,11 @@
 #include "Logging.h"
 #include <chrono>
 
-FILE *LogFile;
+FILE *LogFile = stderr;
 
 void OpenLogFile()
 {
+	CloseLogFile();
 	LogFile = fopen("spacesync_driver.log", "a");
 	if (LogFile == nullptr)
 	{
@@ -18,9 +19,12 @@ void OpenLogFile()
 
 void CloseLogFile()
 {
-	int result = fclose(LogFile);
-	if (result != 0)
-		std::exit(EXIT_FAILURE);
+	// Producers are drained by Cleanup before closing. The fallback stream is
+	// owned by the host, and a failed diagnostic flush must not exit vrserver.
+	FILE* owned = LogFile;
+	LogFile = stderr;
+	if (owned && owned != stderr)
+		(void)fclose(owned);
 }
 
 tm TimeForLog()
