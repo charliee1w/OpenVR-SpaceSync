@@ -63,6 +63,10 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(report["invalid_records"], 1)
         json.dumps(report, allow_nan=False)
 
+    def test_unrepresentable_cadence_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MODULE.inspect(capture([sample(0), sample(1e308)]))
+
 
 if __name__ == "__main__":
     unittest.main()

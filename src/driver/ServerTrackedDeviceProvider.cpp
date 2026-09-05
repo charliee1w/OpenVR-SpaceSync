@@ -8,9 +8,45 @@
 #include "Version.h"
 
 #include <cmath>
+#include <filesystem>
+#include <string>
 
 namespace
 {
+	void StartConfiguredPoseCapture(spacesync::PoseCapture& capture) noexcept
+	{
+		// Diagnostics are opt-in and must never prevent a usable driver startup.
+		try
+		{
+			auto* settings = vr::VRSettings();
+			vr::EVRSettingsError error = vr::VRSettingsError_None;
+			if (!settings || !settings->GetBool("driver_spacesync", "capturePoses", &error)
+				|| error != vr::VRSettingsError_None) return;
+			const DWORD capacity = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+			if (capacity == 0) { LOG("Pose capture unavailable: LOCALAPPDATA is missing%s", ""); return; }
+			std::wstring localAppData(capacity, L'\0');
+			const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData.data(), capacity);
+			if (length == 0 || length >= capacity)
+			{ LOG("Pose capture unavailable: LOCALAPPDATA changed during lookup%s", ""); return; }
+			localAppData.resize(length);
+			const auto directory = std::filesystem::path(localAppData) / L"SpaceSync" / L"captures";
+			std::filesystem::create_directories(directory);
+			SYSTEMTIME utc;
+			GetSystemTime(&utc);
+			LARGE_INTEGER counter;
+			QueryPerformanceCounter(&counter);
+			wchar_t filename[128];
+			swprintf_s(filename, L"poses_%04u%02u%02u_%02u%02u%02u_%lu_%lld.csv",
+				utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond,
+				GetCurrentProcessId(), counter.QuadPart);
+			const auto path = directory / filename;
+			if (capture.Start(path)) LOG("Pose capture enabled: %ls", path.c_str());
+			else LOG("Pose capture could not start: %ls", path.c_str());
+		}
+		catch (const std::exception& error) { LOG("Pose capture unavailable: %s", error.what()); }
+		catch (...) { LOG("Pose capture unavailable: unexpected startup failure%s", ""); }
+	}
+
 	double QpcNowSeconds()
 	{
 		LARGE_INTEGER time, frequency;
@@ -253,6 +289,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		return vr::VRInitError_Driver_Failed;
 	}
 
+	StartConfiguredPoseCapture(poseCapture);
 	return vr::VRInitError_None;
 }
 
@@ -262,6 +299,13 @@ void ServerTrackedDeviceProvider::Cleanup()
 	server.Stop();
 	DisableHooks();
 	ShutdownPoseUpdates();
+	poseCapture.Stop();
+	const auto captureStats = poseCapture.GetStats();
+	if (captureStats.accepted || captureStats.dropped || captureStats.ioFailed)
+		LOG("Pose capture stopped: accepted=%llu written=%llu dropped=%llu ioFailed=%d",
+			static_cast<unsigned long long>(captureStats.accepted),
+			static_cast<unsigned long long>(captureStats.written),
+			static_cast<unsigned long long>(captureStats.dropped), captureStats.ioFailed ? 1 : 0);
 	// IPC and complete detour calls have relinquished all logging/context use.
 	LOG("SpaceSync driver unloaded");
 	CloseLogFile();

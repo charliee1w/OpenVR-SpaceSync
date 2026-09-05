@@ -41,3 +41,9 @@ observability and timing boundaries, pose transforms and concurrent state access
 IPC and hook shutdown, and installer lifecycle and legacy-driver migration.
 It adds native regression tests and retains the AGPL-3.0-only license.
 See `docs/tracking-correctness.md` and the git history for scope and validation.
+
+The 2026-09-05 trial candidate adds bounded historical pose matching, background
+alignment solving with generation checks, independent calibration validation,
+optional local pose diagnostics, and host-safe logging cleanup. See
+`docs/trial-candidate.md`; software/replay tests do not establish hardware tracking
+accuracy or motion-to-photon latency.

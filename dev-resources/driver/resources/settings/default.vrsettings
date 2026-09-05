@@ -1,5 +1,6 @@
 {
 	"driver_spacesync": {
-		"loadPriority": 9999
+		"loadPriority": 9999,
+		"capturePoses": false
 	}
 }

@@ -2,4 +2,4 @@
 
 #pragma once
 
-#define SPACECAL_VERSION_STRING "1.3.2-codex.1"
+#define SPACECAL_VERSION_STRING "1.3.2-codex.2"

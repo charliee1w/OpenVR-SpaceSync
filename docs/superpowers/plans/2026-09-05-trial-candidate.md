@@ -26,39 +26,39 @@
 
 Owner: driver worker. Files: `ServerTrackedDeviceProvider.{h,cpp}`, focused worker helpers, `tests/driver/`.
 
-- [ ] Reproduce timestamp contention and callback solve costs with production-path tests.
-- [ ] Capture arrival before locks and retain explicit prediction target semantics.
-- [ ] Move expensive solves to bounded background work; publish coherent current-generation results.
-- [ ] Integrate timestamped history; invalidate incompatible epochs and support immediate known recenter handling.
-- [ ] Verify delayed solves/configuration changes, shutdown, burst input, invalid poses and prediction timing; commit the tested unit.
+- [x] Reproduce timestamp contention and callback solve costs with production-path tests.
+- [x] Capture arrival before locks and retain explicit prediction target semantics.
+- [x] Move expensive solves to bounded background work; publish coherent current-generation results.
+- [x] Integrate timestamped history; invalidate incompatible epochs and support immediate known recenter handling.
+- [x] Verify delayed solves/configuration changes, shutdown, burst input, invalid poses and prediction timing; commit the tested unit.
 
 ### Historical pairing and deterministic replay
 
 Owner: estimator worker. Files: new `PoseHistory.h`, `tests/estimator/`, focused estimator headers if required.
 
-- [ ] Add failing tests for asynchronous pose streams, independent lag signs and motion reversals.
-- [ ] Implement bounded quaternion/position interpolation with explicit generation, freshness and gap checks.
-- [ ] Cover nonfinite, duplicate/out-of-order input, capacity wrap, resets and dropout recovery.
-- [ ] Compare historical pairing with latest-pose extrapolation on known deterministic trajectories; document the limits and commit.
+- [x] Add failing tests for asynchronous pose streams, independent lag signs and motion reversals.
+- [x] Implement bounded quaternion/position interpolation with explicit generation, freshness and gap checks.
+- [x] Cover nonfinite, duplicate/out-of-order input, capacity wrap, resets and dropout recovery.
+- [x] Compare historical pairing with latest-pose extrapolation on known deterministic trajectories; document the limits and commit.
 
 ### Calibration validation and guidance
 
 Owner: calibration worker. Files: `Calibration.{h,cpp}`, `UserInterface.{h,cpp}`, `tests/calibration/`.
 
-- [ ] Add production regressions for good fit/bad independent validation and profile preservation.
-- [ ] Retain fitted candidate privately while gathering a separate validation movement.
-- [ ] Require adequate independent motion and positional/angular consistency before publication.
-- [ ] Give specific missing-motion guidance and report scale measured versus assumed.
-- [ ] Verify success, rejection, insufficient coverage, tracking loss, cancel, timeout and persistence failure; commit.
+- [x] Add production regressions for good fit/bad independent validation and profile preservation.
+- [x] Retain fitted candidate privately while gathering a separate validation movement.
+- [x] Require adequate independent motion and positional/angular consistency before publication.
+- [x] Give specific missing-motion guidance and report scale measured versus assumed.
+- [x] Verify success, rejection, insufficient coverage, tracking loss, cancel, timeout and persistence failure; commit.
 
 ### Trial diagnostics and delivery
 
 Owner: primary agent. Files: new bounded pose-capture helper/tests, diagnostic tool, root CMake, version, release documentation and artifacts.
 
-- [ ] Implement opt-in local pose capture with nonblocking ingress, background writes, explicit time/epoch/role metadata and hard duration/size limits.
-- [ ] Verify disabled mode, malformed input, queue saturation, startup/write failures, shutdown and bounded files.
-- [ ] Integrate capture without logging private profiles or device serials; provide an offline inspection tool.
-- [ ] Review cross-component timing, reference and lifetime contracts; repair concrete review findings.
+- [x] Implement opt-in local pose capture with nonblocking ingress, background writes, explicit time/epoch/role metadata and hard duration/size limits.
+- [x] Verify disabled mode, malformed input, queue saturation, startup/write failures, shutdown and bounded files.
+- [x] Integrate capture without logging private profiles or device serials; provide an offline inspection tool.
+- [x] Review cross-component timing, reference and lifetime contracts; repair concrete review findings.
 - [ ] Build full x64 Release overlay/driver and installer, run all CTest groups in Release and Debug, inspect the packaged file set.
 - [ ] Produce a source patch, checksummed trial installer and clear install/rollback/trial instructions. Commit and update the existing fork branch.
 

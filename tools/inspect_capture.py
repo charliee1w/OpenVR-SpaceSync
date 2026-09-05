@@ -90,6 +90,8 @@ def inspect(source):
     for key, stream in sorted(streams.items()):
         times = sorted(stream["times"])
         intervals = [(b - a) * 1000 for a, b in zip(times, times[1:])]
+        if not all(map(math.isfinite, intervals)):
+            raise ValueError("capture cadence cannot be represented in milliseconds")
         output[key] = {
             "records": len(times), "invalid": stream["invalid"],
             "duration_seconds": times[-1] - times[0],
@@ -112,11 +114,12 @@ def main():
     try:
         with args.capture.open(encoding="utf-8", newline="") as source:
             report = inspect(source)
+        rendered = json.dumps(report, indent=2, allow_nan=False) if args.json else None
     except (OSError, ValueError, OverflowError, csv.Error) as error:
         print(f"Capture could not be inspected: {error}", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps(report, indent=2, allow_nan=False))
+        print(rendered)
     else:
         print(f"{report['records']} records; {report['invalid_records']} invalid observations; "
               f"{report['generations']} generations; dropped: {report['dropped']}")

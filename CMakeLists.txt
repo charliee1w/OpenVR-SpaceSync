@@ -98,7 +98,9 @@ target_link_libraries(driver_spacesync PRIVATE
     Eigen
 )
 
-set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+# Match MinHook's runtime in each configuration; a forced release CRT mixes
+# MSVCRT and MSVCRTD when the driver is built for debugging.
+set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 set_target_properties(driver_spacesync PROPERTIES PREFIX "")
 
 include(CTest)

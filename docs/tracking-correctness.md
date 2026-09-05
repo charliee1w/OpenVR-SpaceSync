@@ -1,5 +1,10 @@
 # Tracking correctness fork
 
+This is the verification record for `1.3.2-codex.1`. The subsequent
+[`1.3.2-codex.2` trial candidate](trial-candidate.md) changes the timing/callback
+architecture and adds independent calibration checks; the callback-cost
+limitation below describes the earlier build.
+
 This branch repairs the review findings against upstream SpaceSync 1.3.2,
 commit `be88d36ecbaa6ee6e42cb87d06c601e2229b166f`. It retains the existing
 Follow SLAM and override modes and IPC protocol version 12.
