@@ -58,8 +58,8 @@ Owner: primary agent. Files: `IPCServer.{h,cpp}`, driver `Cleanup()`, installer,
 
 - [x] Add Windows named-pipe lifecycle tests using a unique pipe, with no live VR connection, covering empty/active/pending I/O and rapid shutdown.
 - [x] Demonstrate shutdown/lifecycle failures, then make startup/stop/join/I/O ownership deterministic and keep logging alive until producers stop.
-- [ ] Resolve and validate runtime path before removing helpers; check registration command outcomes.
-- [ ] Handle leftover legacy driver by a reversible settings change in the installer, with explicit user-facing migration choice; never recursively delete arbitrary discovered driver directories.
-- [ ] Integrate all native regression targets in CTest; compile driver and overlay and build the installer without executing it.
-- [ ] Review combined diff, run required checks, document validation limits and commit.
-- [ ] Push verified branch to the fork and provide a reviewable comparison. Do not deploy.
+- [x] Resolve and validate runtime path before removing helpers; check registration command outcomes.
+- [x] Handle leftover legacy driver by a reversible settings change in the installer, with explicit user-facing migration choice; never recursively delete arbitrary discovered driver directories.
+- [x] Integrate all native regression targets in CTest; compile driver and overlay and build the installer without executing it.
+- [x] Review combined diff, run required checks, document validation limits and commit.
+- [x] Push verified branch to the fork and provide a reviewable comparison. Do not deploy.
