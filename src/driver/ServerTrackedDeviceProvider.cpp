@@ -93,20 +93,28 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
   	trackerFilter.translation.SetR(1.0e-5);
 	trackerFilter.translation.SetAdaptiveGain(4.0);
 
-	InjectHooks(pDriverContext);
-	server.Run();
+	if (!InjectHooks(pDriverContext) || !server.Run())
+	{
+		LOG("Hook or IPC startup failed; unloading driver%s", "");
+		DisableHooks();
+		ShutdownPoseUpdates();
+		CloseLogFile();
+		VR_CLEANUP_SERVER_DRIVER_CONTEXT();
+		return vr::VRInitError_Driver_Failed;
+	}
 
 	return vr::VRInitError_None;
 }
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
-	LOG("SpaceSync driver unloaded");
-	CloseLogFile();
-
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
 	server.Stop();
 	DisableHooks();
+	ShutdownPoseUpdates();
+	// IPC and complete detour calls have relinquished all logging/context use.
+	LOG("SpaceSync driver unloaded");
+	CloseLogFile();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 

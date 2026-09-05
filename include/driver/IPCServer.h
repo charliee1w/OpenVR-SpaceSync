@@ -5,8 +5,9 @@
 #include "Protocol.h"
 
 #include <thread>
-#include <set>
 #include <mutex>
+#include <memory>
+#include <string>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -16,40 +17,24 @@ class ServerTrackedDeviceProvider;
 class IPCServer
 {
 public:
-	IPCServer(ServerTrackedDeviceProvider *driver) : driver(driver) { }
+	explicit IPCServer(ServerTrackedDeviceProvider *driver, std::string pipeName = SPACESYNC_PIPE_NAME)
+		: driver(driver), pipeName(std::move(pipeName)) { }
 	~IPCServer();
 
-	void Run();
+	bool Run();
 	void Stop();
 
 private:
 	void HandleRequest(const protocol::Request &request, protocol::Response &response);
 
-	struct PipeInstance
-	{
-		OVERLAPPED overlap; // Used by the API
-		HANDLE pipe;
-		IPCServer *server;
-
-		protocol::Request request;
-		protocol::Response response;
-	};
-
-	PipeInstance *CreatePipeInstance(HANDLE pipe);
-	void ClosePipeInstance(PipeInstance *pipeInst);
-
-	static void RunThread(IPCServer *_this);
-	static BOOL CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe);
-	static void WINAPI CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED overlap);
-	static void WINAPI CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPPED overlap);
-
+	struct PipeInstance;
+	std::unique_ptr<PipeInstance> CreatePipeInstance(bool first);
+	void RunThread(std::unique_ptr<PipeInstance> initial);
+	bool Advance(PipeInstance& instance);
+	// Run/Stop serialize ownership; only RunThread owns pipe I/O and buffers.
+	std::mutex lifecycleMutex;
 	std::thread mainThread;
-
-	bool running = false;
-	bool stop = false;
-
-	std::set<PipeInstance *> pipes;
-	HANDLE connectEvent;
-
+	HANDLE stopEvent = nullptr;
 	ServerTrackedDeviceProvider *driver;
+	std::string pipeName;
 };

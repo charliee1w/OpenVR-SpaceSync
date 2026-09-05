@@ -9,5 +9,5 @@ void OpenLogFile() { }
 void CloseLogFile() { }
 tm TimeForLog() { return {}; }
 void LogFlush() { }
-void InjectHooks(vr::IVRDriverContext*) { }
+bool InjectHooks(vr::IVRDriverContext*) { return true; }
 void DisableHooks() { }

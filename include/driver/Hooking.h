@@ -30,6 +30,8 @@ template<class FuncType> class Hook : public IHook
 {
 public:
 	FuncType originalFunc = nullptr;
+	// Valid independently of MinHook's trampoline after entry jumps are disabled.
+	FuncType TargetFunction() const { return reinterpret_cast<FuncType>(targetFunc); }
 	Hook(const std::string &name) : IHook(name) { }
 
 	bool CreateHookInObjectVTable(void *object, int vtableOffset, void *detourFunction)
