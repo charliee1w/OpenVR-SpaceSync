@@ -10,9 +10,18 @@
 
 #include <openvr_driver.h>
 
-#include <atomic>
 #include <cmath>
 #include <mutex>
+#include <condition_variable>
+
+// External runtime access is separated from state processing: SteamVR may call
+// another driver's pose callback while serving a pose query.
+class DriverPoseSource
+{
+public:
+	virtual ~DriverPoseSource() = default;
+	virtual vr::TrackedDevicePose_t ReadTrackerPose(uint32_t hmdID, uint32_t trackerID, float predictionFrames) = 0;
+};
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
@@ -44,15 +53,40 @@ public:
 
 	////// End vr::IServerTrackedDeviceProvider functions
 
-	ServerTrackedDeviceProvider() : server(this) { }
+	explicit ServerTrackedDeviceProvider(DriverPoseSource* poseSource = nullptr) : poseSource(poseSource), server(this) { }
 	void SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
 	void SetOneEuro(const protocol::SetOneEuro &cmd);
 	void GetStatus(protocol::DriverStatus &status);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
+	// Close callback admission and drain outstanding runtime queries before the
+	// driver context or logging resources are released. Idempotent.
+	void ShutdownPoseUpdates();
 
 private:
+	friend struct DriverStateTestAccess;
+	// Every configuration/status/pose transaction owns this lock. Private helpers
+	// require it too. Never hold it while calling the external pose source.
+	std::mutex stateMutex;
+	uint64_t stateGeneration = 0;
+	DriverPoseSource* poseSource;
+	std::mutex callbackMutex;
+	std::condition_variable callbacksDrained;
+	bool acceptingPoseUpdates = true;
+	size_t activePoseUpdates = 0;
+	class PoseUpdateLease
+	{
+	public:
+		explicit PoseUpdateLease(ServerTrackedDeviceProvider& owner);
+		~PoseUpdateLease();
+		PoseUpdateLease(const PoseUpdateLease&) = delete;
+		PoseUpdateLease& operator=(const PoseUpdateLease&) = delete;
+		explicit operator bool() const { return admitted; }
+	private:
+		ServerTrackedDeviceProvider& owner;
+		bool admitted;
+	};
 	// confidence 0..1 = how much this sample may move the drift estimate.
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
 		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double confidence);
@@ -148,7 +182,6 @@ private:
 		double hmdScale = 1.0;
 	};
 	EffectiveOffsets effective;
-	std::mutex effectiveMutex;
 	EffectiveOffsets effectiveShared;
 	bool effectiveSharedValid = false;
 	EffectiveOffsets published;
@@ -186,7 +219,6 @@ private:
 		double poseTimeOffset = 0.0;              // seconds, as reported by the driver
 		LARGE_INTEGER time = {};                  // when the sample was received
 	};
-	std::mutex trackerSampleMutex;
 	TrackerSample trackerSample;
 
 	void StoreTrackerSample(const vr::DriverPose_t &pose);
@@ -205,17 +237,16 @@ private:
 	struct DeviceTransform
 	{
 		bool enabled = false;
-		vr::HmdVector3d_t translation;
-		vr::HmdQuaternion_t rotation;
-		double scale;
+		vr::HmdVector3d_t translation = {0, 0, 0};
+		vr::HmdQuaternion_t rotation = {1, 0, 0, 0};
+		double scale = 1.0;
 	};
 
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];
 
 	struct HmdTracker
 	{
-		// Written last / read first so the pose thread never sees a half-written config.
-		std::atomic<bool> enabled{ false };
+		bool enabled = false;
 		// Follow SLAM HMD: headset keeps its SLAM pose, lighthouse devices follow it.
 		bool followSlam = false;
 		bool hideHeadTracker = false;
@@ -232,7 +263,7 @@ private:
 		double hmdScale = 1.0;
 	} hmdTracker;
 
-	bool slamSync[vr::k_unMaxTrackedDeviceCount];
+	bool slamSync[vr::k_unMaxTrackedDeviceCount] = {};
 
 	struct DriftCorrection
 	{

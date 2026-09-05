@@ -9,6 +9,51 @@
 
 #include <cmath>
 
+namespace
+{
+	class SteamVrPoseSource final : public DriverPoseSource
+	{
+	public:
+		vr::TrackedDevicePose_t ReadTrackerPose(uint32_t hmdID, uint32_t trackerID, float predictionFrames) override
+		{
+			if (trackerID >= vr::k_unMaxTrackedDeviceCount)
+				return {};
+			auto* properties = vr::VRProperties();
+			auto* host = vr::VRServerDriverHost();
+			if (!properties || !host)
+				return {};
+			const auto container = properties->TrackedDeviceToPropertyContainer(hmdID);
+			float frequency = properties->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
+			if (!std::isfinite(frequency) || frequency <= 0.0f) frequency = 90.0f;
+			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount] = {};
+			host->GetRawTrackedDevicePoses(predictionFrames / frequency, poses, vr::k_unMaxTrackedDeviceCount);
+			return poses[trackerID];
+		}
+	};
+
+	bool FiniteVector(const double (&v)[3])
+	{
+		return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+	}
+
+	bool ValidQuaternion(const vr::HmdQuaternion_t& q)
+	{
+		const double normSquared = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z;
+		return std::isfinite(normSquared) && normSquared > 1e-12;
+	}
+
+	bool AlignmentPoseValid(const vr::DriverPose_t& pose)
+	{
+		return pose.poseIsValid && pose.deviceIsConnected && pose.result == vr::TrackingResult_Running_OK
+			&& std::isfinite(pose.poseTimeOffset)
+			&& ValidQuaternion(pose.qRotation) && ValidQuaternion(pose.qWorldFromDriverRotation)
+			&& ValidQuaternion(pose.qDriverFromHeadRotation)
+			&& FiniteVector(pose.vecPosition) && FiniteVector(pose.vecVelocity)
+			&& FiniteVector(pose.vecAngularVelocity) && FiniteVector(pose.vecAcceleration)
+			&& FiniteVector(pose.vecWorldFromDriverTranslation) && FiniteVector(pose.vecDriverFromHeadTranslation);
+	}
+}
+
 static double QpcSeconds(const LARGE_INTEGER& t)
 {
 	LARGE_INTEGER freq;
@@ -70,38 +115,69 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return;
 
-	auto& tf = transforms[newTransform.openVRID];
+	std::lock_guard<std::mutex> lock(stateMutex);
+	auto next = transforms[newTransform.openVRID];
 
-	// Values first, enabled last, so the pose thread never sees enabled with a half-written transform.
 	if (newTransform.updateTranslation)
-		tf.translation = newTransform.translation;
+		next.translation = newTransform.translation;
 
 	if (newTransform.updateRotation)
-		tf.rotation = newTransform.rotation;
+		next.rotation = newTransform.rotation;
 
 	if (newTransform.updateScale)
-		tf.scale = newTransform.scale;
+		next.scale = newTransform.scale;
 
-	tf.enabled = newTransform.enabled;
+	next.enabled = newTransform.enabled;
+	auto& tf = transforms[newTransform.openVRID];
+	if (tf.enabled != next.enabled || !OffsetsEqual(tf.rotation, tf.translation, tf.scale, next.rotation, next.translation, next.scale))
+	{
+		tf = next;
+		++stateGeneration;
+	}
 }
 
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
-	const bool wasEnabled = hmdTracker.enabled.load(std::memory_order_acquire);
-	if (!cmd.enabled)
-		hmdTracker.enabled.store(false, std::memory_order_release);
+	std::lock_guard<std::mutex> lock(stateMutex);
+	const bool wasEnabled = hmdTracker.enabled;
 
 	double cmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
 	bool keepOffsets = false;
 	if (cmd.enabled && wasEnabled)
 	{
 		bool sameBase = OffsetsEqual(cmd.offsetRotation, cmd.offsetTranslation, cmdScale, hmdTracker.offsetRotation, hmdTracker.offsetTranslation, hmdTracker.hmdScale);
-		bool samePublished;
-		{
-			std::lock_guard<std::mutex> lock(effectiveMutex);
-			samePublished = publishedValid && OffsetsEqual(cmd.offsetRotation, cmd.offsetTranslation, cmdScale, published.rotation, published.translation, published.hmdScale);
-		}
+		bool samePublished = publishedValid && OffsetsEqual(cmd.offsetRotation, cmd.offsetTranslation, cmdScale, published.rotation, published.translation, published.hmdScale);
 		keepOffsets = sameBase || samePublished;
+	}
+	// The overlay resends this command every scan, including published refinement
+	// echoes. An equivalent resend must not invalidate an in-flight runtime query.
+	const double calibrationScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
+	const bool sameOffsets = keepOffsets || OffsetsEqual(cmd.offsetRotation, cmd.offsetTranslation, cmdScale,
+		hmdTracker.offsetRotation, hmdTracker.offsetTranslation, hmdTracker.hmdScale);
+	if (wasEnabled == cmd.enabled && sameOffsets && hmdTracker.followSlam == cmd.followSlamHmd
+		&& hmdTracker.hideHeadTracker == (cmd.hideHeadTracker && cmd.followSlamHmd)
+		&& hmdTracker.slamFallback == cmd.slamFallback && hmdTracker.enableAngularVelocity == cmd.enableAngularVelocity
+		&& hmdTracker.predictionTime == cmd.predictionTime && hmdTracker.hmdID == cmd.hmdID && hmdTracker.trackerID == cmd.trackerID
+		&& OffsetsEqual(cmd.calibrationRotation, cmd.calibrationTranslation, calibrationScale,
+			hmdTracker.calibrationRotation, hmdTracker.calibrationTranslation, hmdTracker.calibrationScale))
+		return;
+	++stateGeneration;
+	hmdTracker.enabled = cmd.enabled;
+	if (hmdTracker.hmdID != cmd.hmdID || hmdTracker.trackerID != cmd.trackerID || hmdTracker.followSlam != cmd.followSlamHmd)
+	{
+		// A new producer or mode cannot reuse finite differences, latency samples,
+		// or filter state from the previous source. The last alignment remains a
+		// fallback until the new source supplies a valid observation.
+		trackerSample.valid = false;
+		frames.reset();
+		clock.reset();
+		lastHmdTime = -1.0;
+		tauRotTrim = 0.0;
+		residualDiag.reset();
+		headFilter.reset();
+		headVel.reset();
+		trackerFilter.reset();
+		keepOffsets = false;
 	}
 
 	vr::HmdQuaternion_t baseRotation = hmdTracker.offsetRotation;
@@ -150,15 +226,9 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		mount.reset();
 		refine.reset();
 		refinePrimed = false;
-		{
-			std::lock_guard<std::mutex> lock(trackerSampleMutex);
-			trackerSample.valid = false;
-		}
-		{
-			std::lock_guard<std::mutex> lock(effectiveMutex);
-			effectiveSharedValid = false;
-			publishedValid = false;
-		}
+		trackerSample.valid = false;
+		effectiveSharedValid = false;
+		publishedValid = false;
 		memset(slamSync, 0, sizeof slamSync);
 	}
 	else
@@ -169,10 +239,7 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 			mount.reset();
 			refinePrimed = false;
 			UpdateEffectiveOffsets();
-			{
-				std::lock_guard<std::mutex> lock(effectiveMutex);
-				publishedValid = false;
-			}
+			publishedValid = false;
 			if (wasEnabled)
 				LOG("Head tracker offsets changed while running, mount refinement restarted");
 			if (cmd.followSlamHmd && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
@@ -187,7 +254,7 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 				LOG("Follow mode without head tracker: static alignment from calibration, headset recenters are carried over");
 			}
 		}
-		hmdTracker.enabled.store(true, std::memory_order_release);
+		hmdTracker.enabled = true;
 	}
 }
 
@@ -196,19 +263,23 @@ void ServerTrackedDeviceProvider::UpdateEffectiveOffsets()
 	effective.rotation = refine.effectiveRotation(hmdTracker.offsetRotation);
 	effective.translation = refine.effectiveTranslation(hmdTracker.offsetRotation, hmdTracker.offsetTranslation);
 	effective.hmdScale = hmdTracker.hmdScale / (1.0 + refine.scale);
-	std::lock_guard<std::mutex> lock(effectiveMutex);
 	effectiveShared = effective;
 	effectiveSharedValid = true;
 }
 
 void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 {
-	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount)
+	std::lock_guard<std::mutex> lock(stateMutex);
+	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount && slamSync[cmd.openVRID] != cmd.enabled)
+	{
 		slamSync[cmd.openVRID] = cmd.enabled;
+		++stateGeneration;
+	}
 }
 
 void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 {
+	std::lock_guard<std::mutex> lock(stateMutex);
 	auto toParams = [](const protocol::OneEuroParams& p) {
 		oneeuro::Params out;
 		out.minCutoff = p.minCutoff < 0.01 ? 0.01 : p.minCutoff;
@@ -295,6 +366,7 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 
 void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
 {
+	std::lock_guard<std::mutex> lock(stateMutex);
 	status.driftValid = drift.valid;
 	status.mountShiftSuspected = mount.suspected;
 	status.tiltDeg = mount.tiltDeg;
@@ -307,8 +379,7 @@ void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
 	status.calmSeconds = refine.weight();
 	status.refinementSolves = refine.applied;
 
-	std::lock_guard<std::mutex> lock(effectiveMutex);
-	status.refinementValid = effectiveSharedValid && hmdTracker.enabled.load(std::memory_order_acquire);
+	status.refinementValid = effectiveSharedValid && hmdTracker.enabled;
 	status.offsetRotation = effectiveShared.rotation;
 	status.offsetTranslation = effectiveShared.translation;
 	status.hmdScale = effectiveShared.hmdScale;
@@ -328,6 +399,7 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 	pose.vecPosition[0] *= slamScale;
 	pose.vecPosition[1] *= slamScale;
 	pose.vecPosition[2] *= slamScale;
+	for (double& velocity : pose.vecVelocity) velocity *= slamScale;
 
 	double scaledTranslation[3] = {
 		pose.vecWorldFromDriverTranslation[0] * slamScale,
@@ -353,6 +425,7 @@ void ServerTrackedDeviceProvider::ApplyInverseDrift(vr::DriverPose_t& pose) cons
 	pose.vecPosition[0] *= invScale;
 	pose.vecPosition[1] *= invScale;
 	pose.vecPosition[2] *= invScale;
+	for (double& velocity : pose.vecVelocity) velocity *= invScale;
 
 	double shifted[3] = {
 		(pose.vecWorldFromDriverTranslation[0] - drift.translation.v[0]) * invScale,
@@ -407,6 +480,17 @@ void ServerTrackedDeviceProvider::StoreTrackerSample(const vr::DriverPose_t& pos
 	s.poseIsValid = pose.poseIsValid;
 	s.deviceIsConnected = pose.deviceIsConnected;
 	s.result = pose.result;
+	if (!AlignmentPoseValid(pose))
+	{
+		// Preserve the tracking flags for status/fallback, but never put invalid
+		// coordinates into the clock or difference them against the next sample.
+		QueryPerformanceCounter(&s.time);
+		s.poseIsValid = false;
+		trackerSample = s;
+		frames.reset();
+		clock.noteTrackerDiscontinuity();
+		return;
+	}
 
 	// Same math vrserver uses for mDeviceToAbsoluteTracking.
 	s.rotation = quaternionNormalize(pose.qWorldFromDriverRotation * pose.qRotation * pose.qDriverFromHeadRotation);
@@ -433,6 +517,11 @@ void ServerTrackedDeviceProvider::StoreTrackerSample(const vr::DriverPose_t& pos
 	s.poseTimeOffset = pose.poseTimeOffset;
 	QueryPerformanceCounter(&s.time);
 	double nominal = QpcSeconds(s.time) + s.poseTimeOffset;
+	if (frames.primed && (nominal <= frames.time || nominal - frames.time > 0.1))
+	{
+		frames.reset();
+		clock.noteTrackerDiscontinuity();
+	}
 
 	if (frames.primed)
 	{
@@ -531,16 +620,17 @@ void ServerTrackedDeviceProvider::StoreTrackerSample(const vr::DriverPose_t& pos
 	s.linSpeed = vecNorm(vel);
 	s.angSpeed = vecNorm(angVel);
 
-	vr::HmdVector3d_t headPoint = vecAdd(vecFromArray(s.position), quaternionRotateVector(s.rotation, hmdTracker.offsetTranslation));
+	// Calibration offsets are expressed in calibrated metres, whereas the clock
+	// series is still in the tracker's raw coordinate system.
+	const auto rawMountOffset = vecScale(hmdTracker.offsetTranslation, 1.0 / hmdTracker.calibrationScale);
+	vr::HmdVector3d_t headPoint = vecAdd(vecFromArray(s.position), quaternionRotateVector(s.rotation, rawMountOffset));
 
-	std::lock_guard<std::mutex> lock(trackerSampleMutex);
 	trackerSample = s;
 	clock.addTrackerPose(nominal, s.rotation, headPoint);
 }
 
 ServerTrackedDeviceProvider::TrackerSample ServerTrackedDeviceProvider::LoadTrackerSample()
 {
-	std::lock_guard<std::mutex> lock(trackerSampleMutex);
 	return trackerSample;
 }
 
@@ -609,12 +699,49 @@ void ServerTrackedDeviceProvider::NoteTrackerState(bool trackerOK, bool usingSla
 	st.lastResult = tp.eTrackingResult;
 }
 
+ServerTrackedDeviceProvider::PoseUpdateLease::PoseUpdateLease(ServerTrackedDeviceProvider& owner) : owner(owner)
+{
+	std::lock_guard<std::mutex> lock(owner.callbackMutex);
+	admitted = owner.acceptingPoseUpdates;
+	if (admitted) ++owner.activePoseUpdates;
+}
+
+ServerTrackedDeviceProvider::PoseUpdateLease::~PoseUpdateLease()
+{
+	if (!admitted) return;
+	std::lock_guard<std::mutex> lock(owner.callbackMutex);
+	if (--owner.activePoseUpdates == 0) owner.callbacksDrained.notify_all();
+}
+
+void ServerTrackedDeviceProvider::ShutdownPoseUpdates()
+{
+	std::unique_lock<std::mutex> lock(callbackMutex);
+	acceptingPoseUpdates = false;
+	callbacksDrained.wait(lock, [this] { return activePoseUpdates == 0; });
+}
+
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
+	PoseUpdateLease lease(*this);
+	if (!lease) return false;
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return true;
 
-	const bool overrideEnabled = hmdTracker.enabled.load(std::memory_order_acquire);
+	std::unique_lock<std::mutex> lock(stateMutex);
+	vr::TrackedDevicePose_t rawTracker = {};
+	if (hmdTracker.enabled && !hmdTracker.followSlam && openVRID == hmdTracker.hmdID)
+	{
+		const auto generation = stateGeneration;
+		const auto hmdID = hmdTracker.hmdID, trackerID = hmdTracker.trackerID;
+		const auto predictionFrames = hmdTracker.predictionTime;
+		lock.unlock();
+		static SteamVrPoseSource runtime;
+		rawTracker = (poseSource ? poseSource : &runtime)->ReadTrackerPose(hmdID, trackerID, predictionFrames);
+		lock.lock();
+		if (generation != stateGeneration)
+			return false; // Do not publish an old-config pose after reconfiguration.
+	}
+	const bool overrideEnabled = hmdTracker.enabled;
 	const bool followSlam = overrideEnabled && hmdTracker.followSlam;
 
 	// Follow mode: stash the raw head tracker pose before any transform touches it.
@@ -629,6 +756,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecPosition[0] *= tf.scale;
 		pose.vecPosition[1] *= tf.scale;
 		pose.vecPosition[2] *= tf.scale;
+		for (double& velocity : pose.vecVelocity) velocity *= tf.scale;
 
 		vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(tf.rotation, pose.vecWorldFromDriverTranslation);
 		pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + tf.translation.v[0];
@@ -663,7 +791,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	{
 		if (openVRID == hmdTracker.hmdID)
 		{
-			bool rawValid = pose.poseIsValid && pose.deviceIsConnected && pose.result == vr::TrackingResult_Running_OK;
+			bool rawValid = AlignmentPoseValid(pose);
 			vr::HmdQuaternion_t rawRotation = { 1, 0, 0, 0 };
 			double rawPosition[3] = { 0, 0, 0 };
 			if (rawValid)
@@ -696,6 +824,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				bool freshPose = !rawValid || lastHmdTime < 0.0 || hmdTime - lastHmdTime > 0.001;
 				if (rawValid)
 				{
+					if (lastHmdTime >= 0.0 && (hmdTime <= lastHmdTime || hmdTime - lastHmdTime > 0.1))
+						clock.noteHmdDiscontinuity();
 					// Before the pose enters the clock series, a step there reads as a velocity spike.
 					double jumpYaw = 0.0;
 					vr::HmdVector3d_t jumpTranslation = { 0, 0, 0 };
@@ -719,6 +849,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 					clock.addHmdPose(hmdTime, rawRotation, vecFromArray(rawPosition));
 					lastHmdTime = hmdTime;
+				}
+				else
+				{
+					clock.noteHmdDiscontinuity();
+					lastHmdTime = -1.0;
+					hmdFrame.reset();
 				}
 
 				const bool trackerHasPose = ts.valid && age < 0.25 && ts.deviceIsConnected && ts.poseIsValid;
@@ -758,7 +894,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					};
 
 					vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * sampleRotation);
-					vr::HmdVector3d_t trackerRefPosition = quaternionRotateVector(hmdTracker.calibrationRotation, samplePosition);
+					vr::HmdVector3d_t trackerRefPosition = vecScale(quaternionRotateVector(hmdTracker.calibrationRotation, samplePosition), hmdTracker.calibrationScale);
 					trackerRefPosition.v[0] += hmdTracker.calibrationTranslation.v[0];
 					trackerRefPosition.v[1] += hmdTracker.calibrationTranslation.v[1];
 					trackerRefPosition.v[2] += hmdTracker.calibrationTranslation.v[2];
@@ -775,11 +911,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 					if (clock.due(nowSeconds))
 					{
-						bool updated;
-						{
-							std::lock_guard<std::mutex> lock(trackerSampleMutex);
-							updated = clock.solve(nowSeconds);
-						}
+						bool updated = clock.solve(nowSeconds);
 						if (updated && nowSeconds - clockLogTime > 10.0)
 						{
 							clockLogTime = nowSeconds;
@@ -866,6 +998,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 							{
 								drift.estimator.absorbRefinement(applied.rotation, applied.translation, applied.scale, rawRotation, vecFromArray(rawPosition), headRotationBase, SlamToCorrectedScaleBase(), scaleBefore);
 								UpdateEffectiveOffsets();
+								drift.rotation = drift.estimator.rotation();
+								drift.translation = drift.estimator.translation;
 							}
 
 							bool was = mount.suspected;
@@ -897,18 +1031,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				return true;
 			}
 
-			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
-
-			float displayFrequency = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
-			if (!(displayFrequency > 0.0f))
-				displayFrequency = 90.0f;
-
-			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((float)((1.0 / displayFrequency) * hmdTracker.predictionTime), poses, vr::k_unMaxTrackedDeviceCount);
-
-			vr::TrackedDevicePose_t tp = {};
-			if (hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount)
-				tp = poses[hmdTracker.trackerID];
+			const vr::TrackedDevicePose_t& tp = rawTracker;
 
 			// Lighthouse keeps bPoseIsValid true while dead-reckoning on the IMU (OutOfRange),
 			// only Running_OK is a real optical pose.
@@ -935,7 +1058,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					filteredTrackerPos.v[2]
 				};
 
-				vr::HmdVector3d_t trackerRefPosition = quaternionRotateVector(hmdTracker.calibrationRotation, trackerPos);
+				vr::HmdVector3d_t trackerRefPosition = vecScale(quaternionRotateVector(hmdTracker.calibrationRotation, trackerPos), hmdTracker.calibrationScale);
 
 				trackerRefPosition.v[0] += hmdTracker.calibrationTranslation.v[0];
 				trackerRefPosition.v[1] += hmdTracker.calibrationTranslation.v[1];
