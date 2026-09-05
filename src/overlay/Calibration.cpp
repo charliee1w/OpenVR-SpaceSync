@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 
 #include <Dense>
 
@@ -347,10 +348,19 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 		constants.segment<3>(i * 3) = samples[i].ref.trans;
 	}
 
-	Eigen::VectorXd result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+	auto decomposition = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
+	// Float pose noise can make a physically singular scale/mount system appear
+	// full-rank at Eigen's machine-epsilon default. Require a usable separation.
+	decomposition.setThreshold(1e-4);
+	if (decomposition.rank() < 7)
+	{
+		CalCtx.Log("Headset scale is not independently observable, assuming 1\n");
+		return 1.0;
+	}
+	Eigen::VectorXd result = decomposition.solve(constants);
 	double fittedScale = result(0);
 
-	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
+	if (!std::isfinite(fittedScale) || fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
 		snprintf(buf, sizeof buf, "Fitted headset scale %.5f is outside %.2f..%.2f, assuming 1\n", fittedScale, MinCalibratedScale, MaxCalibratedScale);
 		CalCtx.Log(buf);
@@ -363,40 +373,37 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	return fittedScale;
 }
 
-static const double AxisVarianceThreshold = 0.0005;
-
-static double SecondAxisVariance(const std::vector<Sample> &samples)
+// Relative rotation vectors represent physical axes. Quaternion covariance also
+// measures the curvature of a one-axis arc and rejects ordinary yaw/pitch sweeps.
+static bool HasObservableMotion(const std::vector<Sample> &samples)
 {
-	std::vector<Eigen::Vector4d> points;
-	points.reserve(samples.size());
-	Eigen::Vector4d mean = Eigen::Vector4d::Zero();
-
-	for (auto &sample : samples)
-	{
-		Eigen::Quaterniond q(sample.target.rot);
-		if (q.w() < 0)
-			q.coeffs() = -q.coeffs();
-
-		Eigen::Vector4d point(q.w(), q.x(), q.y(), q.z());
-		mean += point;
-		points.push_back(point);
-	}
-
-	if (points.empty())
-		return 0.0;
-
-	mean /= (double)points.size();
-
-	Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
-	for (auto &point : points)
-	{
-		Eigen::Vector4d d = point - mean;
-		cov += d * d.transpose();
-	}
-	cov /= (double)points.size();
-
-	Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> solver(cov);
-	return solver.eigenvalues()(1);
+	Eigen::Matrix3d refAxes = Eigen::Matrix3d::Zero(), targetAxes = Eigen::Matrix3d::Zero();
+	Eigen::Matrix3d refTranslation = Eigen::Matrix3d::Zero(), targetTranslation = Eigen::Matrix3d::Zero();
+	size_t accepted = 0;
+	for (size_t i = 0; i < samples.size(); ++i)
+		for (size_t j = 0; j < i; ++j)
+		{
+			auto delta = DeltaRotationSamples(samples[i], samples[j]);
+			if (!delta.valid) continue;
+			refAxes += delta.ref * delta.ref.transpose();
+			targetAxes += delta.target * delta.target.transpose();
+			Eigen::Matrix3d a = samples[i].ref.rot.transpose() - samples[j].ref.rot.transpose();
+			Eigen::Matrix3d b = samples[i].target.rot.transpose() - samples[j].target.rot.transpose();
+			refTranslation += a.transpose() * a;
+			targetTranslation += b.transpose() * b;
+			++accepted;
+		}
+	if (accepted < 20) return false;
+	auto observable = [&](const Eigen::Matrix3d &information, int requiredAxis) {
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(information / static_cast<double>(accepted));
+		if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return false;
+		const auto &values = solver.eigenvalues();
+		return values(requiredAxis) > 0.001 && values(requiredAxis) > values(2) * 0.01;
+	};
+	// Two nonparallel physical rotation axes and a full-rank translation solve
+	// must be observable in both input spaces, irrespective of their alignment.
+	return observable(refAxes, 1) && observable(targetAxes, 1)
+		&& observable(refTranslation, 0) && observable(targetTranslation, 0);
 }
 
 static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &samples, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
@@ -421,33 +428,21 @@ static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eige
 
 Sample CollectSample(const CalibrationContext &ctx)
 {
-	vr::TrackedDevicePose_t reference, target;
-	reference.bPoseIsValid = false;
-	target.bPoseIsValid = false;
-
-	reference = ctx.devicePoses[0];
-	target = ctx.devicePoses[ctx.targetID];
-
-	bool ok = true;
-	if (!reference.bPoseIsValid)
-	{
-		CalCtx.Log("Reference device is not tracking\n"); ok = false;
-	}
-	if (!target.bPoseIsValid)
-	{
-		CalCtx.Log("Target device is not tracking\n"); ok = false;
-	}
-	if (!ok)
-	{
-		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+	if (ctx.targetID >= vr::k_unMaxTrackedDeviceCount)
 		return Sample();
-	}
-
-	return Sample(
-		Pose(reference.mDeviceToAbsoluteTracking),
-		Pose(target.mDeviceToAbsoluteTracking)
-	);
+	auto usable = [](const vr::TrackedDevicePose_t &pose) {
+		if (!pose.bPoseIsValid || !pose.bDeviceIsConnected || pose.eTrackingResult != vr::TrackingResult_Running_OK)
+			return false;
+		Pose p(pose.mDeviceToAbsoluteTracking);
+		return p.rot.allFinite() && p.trans.allFinite()
+			&& (p.rot.transpose() * p.rot - Eigen::Matrix3d::Identity()).norm() < 0.01
+			&& std::abs(p.rot.determinant() - 1.0) < 0.01;
+	};
+	const auto &reference = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+	const auto &target = ctx.devicePoses[ctx.targetID];
+	if (!usable(reference) || !usable(target))
+		return Sample();
+	return Sample(Pose(reference.mDeviceToAbsoluteTracking), Pose(target.mDeviceToAbsoluteTracking));
 }
 
 vr::HmdQuaternion_t VRRotationQuat(Eigen::Vector3d eulerdeg)
@@ -740,15 +735,23 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
+struct CalibrationIdentity
+{
+	std::string trackingSystem, hmdSerial, trackerSerial;
+};
+static CalibrationIdentity pendingIdentity;
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID, double time)
 {
 	ctx.targetID = targetID;
-	ctx.targetTrackingSystem = GetDeviceTrackingSystem(targetID);
-	ctx.hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
-	ctx.trackerSerial = GetDeviceSerial(targetID);
+	// Application shutdown/settings saves can occur while sampling. Leave the
+	// persisted identity paired with its existing mount until the solve commits.
+	pendingIdentity.trackingSystem = GetDeviceTrackingSystem(targetID);
+	pendingIdentity.hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
+	pendingIdentity.trackerSerial = GetDeviceSerial(targetID);
 
 	char buf[256];
-	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
+	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", pendingIdentity.trackerSerial.c_str(), targetID);
 	ctx.Log(buf);
 
 	ResetAndDisableOffsets(targetID);
@@ -764,27 +767,52 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID, doubl
 
 static std::vector<Sample> collectedSamples;
 static int coplanarRetries = 0;
+static std::optional<CalibrationContext> previousCalibration;
+static std::optional<double> invalidSince;
+static constexpr double TrackingLossTimeout = 2.0;
+static constexpr int MaxSamplingWindows = 3;
+static constexpr size_t MaxCalibrationSamples = 720;
+static double detectionStart = 0.0;
 
 void StartCalibration()
 {
+	if (CalCtx.state == CalibrationState::Begin || CalCtx.state == CalibrationState::Detect || CalCtx.state == CalibrationState::Sampling)
+		return;
+	// Preserve the in-memory profile, including any unsaved edits/refinement.
+	// Registry reloads are neither a stable nor complete rollback source.
+	previousCalibration = CalCtx;
 	CalCtx.lastCalibrationOk = false;
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
 	Detection.Clear();
 	collectedSamples.clear();
+	invalidSince.reset();
 	coplanarRetries = 0;
 }
 
 static void AbortAndRestoreProfile(CalibrationContext &ctx)
 {
-	if (ctx.targetID != vr::k_unTrackedDeviceIndexInvalid)
-		ResetAndDisableOffsets(ctx.targetID);
-
-	LoadProfile(ctx);
+	const auto rejectedTarget = ctx.targetID;
+	const double lastTick = ctx.timeLastTick;
+	auto messages = std::move(ctx.messages);
+	if (previousCalibration)
+		ctx = std::move(*previousCalibration);
+	previousCalibration.reset();
+	ctx.messages = std::move(messages);
+	ctx.timeLastTick = lastTick;
+	ctx.timeLastScan = lastTick - 1.0; // reapply the restored profile on the next tick
 	ctx.state = CalibrationState::None;
+	ctx.lastCalibrationOk = false;
+	ctx.wantedUpdateInterval = 1.0;
 	collectedSamples.clear();
+	Detection.Clear();
+	invalidSince.reset();
 	coplanarRetries = 0;
+	// Restore state even if the external connection failed during the run.
+	if (rejectedTarget < vr::k_unMaxTrackedDeviceCount)
+		try { ResetAndDisableOffsets(rejectedTarget); }
+		catch (const std::runtime_error &e) { ctx.Log(std::string("Could not reset tracker offsets: ") + e.what() + "\n"); }
 }
 
 void CancelCalibration()
@@ -887,8 +915,8 @@ void CalibrationTick(double time)
 		if (vr::VRSystem()->GetTrackedDeviceClass(vr::k_unTrackedDeviceIndex_Hmd) != vr::TrackedDeviceClass_HMD ||
 			!ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
 		{
-			ctx.state = CalibrationState::None;
 			CalCtx.Log("No tracking HMD found, aborting calibration!\n");
+			AbortAndRestoreProfile(ctx);
 			return;
 		}
 
@@ -914,11 +942,11 @@ void CalibrationTick(double time)
 
 		if (Detection.candidates.empty())
 		{
-			ctx.state = CalibrationState::None;
 			if (ctx.noHeadTracker)
 				CalCtx.Log("No tracker or controller from a different tracking system detected, aborting! Turn on the device you want to hold against your head.\n");
 			else
 				CalCtx.Log("No trackers from a different tracking system detected, aborting!\n");
+			AbortAndRestoreProfile(ctx);
 			return;
 		}
 
@@ -932,12 +960,19 @@ void CalibrationTick(double time)
 		Detection.candidateSpeeds.resize(Detection.candidates.size());
 		CalCtx.Log("Move your head around to identify the headset tracker...\n");
 		ctx.state = CalibrationState::Detect;
+		detectionStart = time;
 		ctx.wantedUpdateInterval = 0.0;
 		return;
 	}
 
 	if (ctx.state == CalibrationState::Detect)
 	{
+		if (time - detectionStart > 10.0)
+		{
+			ctx.Log("Tracker detection timed out. Previous calibration restored.\n");
+			AbortAndRestoreProfile(ctx);
+			return;
+		}
 		if (!ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
 			return;
 
@@ -971,9 +1006,8 @@ void CalibrationTick(double time)
 
 		if (hmdPeak < 0.5)
 		{
-			Detection.Clear();
-			ctx.state = CalibrationState::None;
 			CalCtx.Log("Didn't detect enough head movement, aborting! Try again and move your head more.\n");
+			AbortAndRestoreProfile(ctx);
 			return;
 		}
 
@@ -996,9 +1030,8 @@ void CalibrationTick(double time)
 
 		if (bestIdx == -1 || bestCorr < 0.7 || (bestCorr - secondCorr) < 0.1)
 		{
-			Detection.Clear();
-			ctx.state = CalibrationState::None;
 			CalCtx.Log("Couldn't clearly identify the headset tracker, aborting! Make sure only the headset tracker moves with your head, then try again.\n");
+			AbortAndRestoreProfile(ctx);
 			return;
 		}
 
@@ -1011,10 +1044,23 @@ void CalibrationTick(double time)
 	auto sample = CollectSample(ctx);
 	if (!sample.valid)
 	{
+		if (!invalidSince)
+		{
+			invalidSince = time;
+			ctx.Log("Tracking interrupted; waiting briefly for a valid sample.\n");
+		}
+		if (time - *invalidSince >= TrackingLossTimeout)
+		{
+			ctx.Log("Tracking did not recover. Previous calibration restored.\n");
+			AbortAndRestoreProfile(ctx);
+		}
 		return;
 	}
+	invalidSince.reset();
 
 	auto &samples = collectedSamples;
+	if (samples.size() == MaxCalibrationSamples)
+		samples.erase(samples.begin());
 	samples.push_back(sample);
 
 	double elapsed = time - ctx.sequenceStart;
@@ -1025,84 +1071,88 @@ void CalibrationTick(double time)
 	{
 		CalCtx.Log("\n");
 
-		if (samples.size() < 40)
+		if (samples.size() < 40 || !HasObservableMotion(samples))
 		{
-			CalCtx.Log("Not enough samples were collected, aborting calibration! Previous calibration restored.\n");
-			AbortAndRestoreProfile(ctx);
-			return;
-		}
-
-
-		double axisVariance = SecondAxisVariance(samples);
-		if (axisVariance < AxisVarianceThreshold)
-		{
-			if (++coplanarRetries >= 10)
+			if (++coplanarRetries >= MaxSamplingWindows)
 			{
-				CalCtx.Log("Not enough rotation variety after several attempts, aborting calibration! Previous calibration restored.\n");
+				ctx.Log("Not enough independent head motion after three sampling windows. Previous calibration restored.\n");
 				AbortAndRestoreProfile(ctx);
 				return;
 			}
-
-			char buf[256];
-			snprintf(buf, sizeof buf, "Head movement is too uniform (axis variance %.5f), tilt and turn your head in different directions! Collecting more samples...\n", axisVariance);
-			CalCtx.Log(buf);
-			samples.erase(samples.begin(), samples.begin() + samples.size() / 4);
+			ctx.Log("Need more rotation around different axes. Starting another look-around sequence...\n");
+			// Start a real window, including fresh voice cues. Retain the useful
+			// data (bounded above), rather than deleting a quarter every tick.
+			ctx.sequenceStart = time;
+			ctx.sequenceStep = 0;
 			return;
 		}
 		coplanarRetries = 0;
 
-		ctx.calibratedRotation = CalibrateRotation(samples);
-
-		Eigen::Vector3d eulerRad = ctx.calibratedRotation * EIGEN_PI / 180.0;
-		Eigen::Matrix3d calRot =
-			(Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
-			 Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
-			 Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
-
-		double calScale = 1.0;
-		ctx.calibratedScale = calScale;
-		ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
-		if (ctx.targetModelScale <= 0.0)
-			ctx.targetModelScale = 1.0;
-
-		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
-
-		for (auto &sample : samples)
-			sample.ref.trans /= ctx.hmdScale;
-
-		ctx.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
-		Eigen::Vector3d calTransM = ctx.calibratedTranslation * 0.01;
-
-		Eigen::Vector3d hmdToTarget = ComputeRefToTargetOffset(samples, calRot, calTransM, calScale);
-		double rmsError = RetargetingErrorRMS(samples, hmdToTarget, calRot, calTransM, calScale);
-
-		char buf2[256];
-		snprintf(buf2, sizeof buf2, "Calibration residual error (RMS): %.1f mm\n", rmsError * 1000.0);
-		CalCtx.Log(buf2);
-
-		// TODO: this is an problem for future considering automatic calibration fixing.
-		if (rmsError > 0.1)
+		try
 		{
-			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
+			ctx.calibratedRotation = CalibrateRotation(samples);
+
+			Eigen::Vector3d eulerRad = ctx.calibratedRotation * EIGEN_PI / 180.0;
+			Eigen::Matrix3d calRot =
+				(Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+				 Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+				 Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+
+			double calScale = 1.0;
+			ctx.calibratedScale = calScale;
+			ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
+			if (ctx.targetModelScale <= 0.0)
+				ctx.targetModelScale = 1.0;
+
+			ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
+
+			for (auto &sample : samples)
+				sample.ref.trans /= ctx.hmdScale;
+
+			ctx.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
+			Eigen::Vector3d calTransM = ctx.calibratedTranslation * 0.01;
+
+			Eigen::Vector3d hmdToTarget = ComputeRefToTargetOffset(samples, calRot, calTransM, calScale);
+			double rmsError = RetargetingErrorRMS(samples, hmdToTarget, calRot, calTransM, calScale);
+
+			char buf2[256];
+			snprintf(buf2, sizeof buf2, "Calibration residual error (RMS): %.1f mm\n", rmsError * 1000.0);
+			CalCtx.Log(buf2);
+
+			// TODO: this is an problem for future considering automatic calibration fixing.
+			if (!std::isfinite(rmsError) || !ctx.calibratedRotation.allFinite() || !ctx.calibratedTranslation.allFinite() || rmsError > 0.1)
+			{
+				CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
+				AbortAndRestoreProfile(ctx);
+				return;
+			}
+
+			ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
+
+			ctx.targetTrackingSystem = pendingIdentity.trackingSystem;
+			ctx.hmdSerial = pendingIdentity.hmdSerial;
+			ctx.trackerSerial = pendingIdentity.trackerSerial;
+			ctx.validProfile = true;
+			if (!SaveProfile(ctx))
+				throw std::runtime_error("could not save the new profile; previous calibration restored");
+			ctx.lastCalibrationOk = true;
+			CalCtx.Log("Finished calibration, profile saved\n");
+
+			if (CalCtx.notificationId != 0) {
+				vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);
+				CalCtx.notificationId = 0;
+			}
+
+
+			ctx.state = CalibrationState::None;
+			previousCalibration.reset();
+			samples.clear();
+		}
+		catch (const std::runtime_error &e)
+		{
+			ctx.Log(std::string("Calibration solve failed: ") + e.what() + "\n");
 			AbortAndRestoreProfile(ctx);
-			return;
 		}
-
-		ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
-
-		ctx.validProfile = true;
-		ctx.lastCalibrationOk = true;
-		SaveProfile(ctx);
-		CalCtx.Log("Finished calibration, profile saved\n");
-
-		if (CalCtx.notificationId != 0) {
-			vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);
-			CalCtx.notificationId = 0;
-		}
-
-
-		ctx.state = CalibrationState::None;
-		samples.clear();
 	}
 }
 
@@ -1114,7 +1164,7 @@ void LoadChaperoneBounds()
 	vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
 
 	CalCtx.chaperone.geometry.resize(quadCount);
-	vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(&CalCtx.chaperone.geometry[0], &quadCount);
+	vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(CalCtx.chaperone.geometry.data(), &quadCount);
 	vr::VRChaperoneSetup()->GetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);
 	vr::VRChaperoneSetup()->GetWorkingPlayAreaSize(&CalCtx.chaperone.playSpaceSize.v[0], &CalCtx.chaperone.playSpaceSize.v[1]);
 	CalCtx.chaperone.valid = true;
@@ -1123,7 +1173,7 @@ void LoadChaperoneBounds()
 void ApplyChaperoneBounds()
 {
 	vr::VRChaperoneSetup()->RevertWorkingCopy();
-	vr::VRChaperoneSetup()->SetWorkingCollisionBoundsInfo(&CalCtx.chaperone.geometry[0], CalCtx.chaperone.geometry.size());
+	vr::VRChaperoneSetup()->SetWorkingCollisionBoundsInfo(CalCtx.chaperone.geometry.data(), CalCtx.chaperone.geometry.size());
 	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);
 	vr::VRChaperoneSetup()->SetWorkingPlayAreaSize(CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
 	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);

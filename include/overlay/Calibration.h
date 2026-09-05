@@ -23,10 +23,10 @@ enum class CalibrationState
 struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
-	uint32_t targetID;
+	uint32_t targetID = vr::k_unTrackedDeviceIndexInvalid;
 
-	Eigen::Vector3d calibratedRotation;
-	Eigen::Vector3d calibratedTranslation;
+	Eigen::Vector3d calibratedRotation = Eigen::Vector3d::Zero();
+	Eigen::Vector3d calibratedTranslation = Eigen::Vector3d::Zero();
 	double calibratedScale = 1.0;
 	double targetModelScale = 1.0;
 	double hmdScale = 1.0;
@@ -72,15 +72,15 @@ struct CalibrationContext
 	};
 	Speed calibrationSpeed = FAST;
 
-	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
+	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount] = {};
 
 	struct Chaperone
 	{
 		bool valid = false;
 		bool autoApply = true;
 		std::vector<vr::HmdQuad_t> geometry;
-		vr::HmdMatrix34_t standingCenter;
-		vr::HmdVector2_t playSpaceSize;
+		vr::HmdMatrix34_t standingCenter = {};
+		vr::HmdVector2_t playSpaceSize = {};
 	} chaperone;
 
 	void Clear()
@@ -90,8 +90,9 @@ struct CalibrationContext
 		chaperone.playSpaceSize = vr::HmdVector2_t();
 		chaperone.valid = false;
 
-		calibratedRotation = Eigen::Vector3d();
-		calibratedTranslation = Eigen::Vector3d();
+		calibratedRotation.setZero();
+		calibratedTranslation.setZero();
+		targetID = vr::k_unTrackedDeviceIndexInvalid;
 		calibratedScale = 1.0;
 		targetModelScale = 1.0;
 		hmdScale = 1.0;

@@ -5,4 +5,5 @@
 #include "Calibration.h"
 
 void LoadProfile(CalibrationContext &ctx);
-void SaveProfile(CalibrationContext &ctx);
+// False means persistence failed; callers committing a new calibration must roll back.
+bool SaveProfile(CalibrationContext &ctx);

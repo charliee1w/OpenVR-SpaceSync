@@ -12,6 +12,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <cmath>
+#include <algorithm>
 
 static picojson::array FloatArray(const float *buf, int numFloats)
 {
@@ -23,161 +25,174 @@ static picojson::array FloatArray(const float *buf, int numFloats)
 	return arr;
 }
 
-static void LoadFloatArray(const picojson::value &obj, float *buf, int numFloats)
+// Parse into a candidate: a malformed field must never leave a partly replaced
+// tracker identity, mount, or chaperone in the active profile.
+static const picojson::value &Required(const picojson::object &obj, const char *key)
 {
-	if (!obj.is<picojson::array>())
-		throw std::runtime_error("expected array, got " + obj.to_str());
+	auto it = obj.find(key);
+	if (it == obj.end())
+		throw std::runtime_error(std::string("missing profile field: ") + key);
+	return it->second;
+}
 
-	auto &arr = obj.get<picojson::array>();
+template<typename T>
+static T Typed(const picojson::value &value, const char *key)
+{
+	if (!value.is<T>())
+		throw std::runtime_error(std::string("invalid type for profile field: ") + key);
+	return value.get<T>();
+}
+
+template<typename T>
+static T Optional(const picojson::object &obj, const char *key, const T &fallback)
+{
+	auto it = obj.find(key);
+	return it == obj.end() ? fallback : Typed<T>(it->second, key);
+}
+
+static double FiniteNumber(const picojson::value &value, const char *key)
+{
+	double number = Typed<double>(value, key);
+	if (!std::isfinite(number))
+		throw std::runtime_error(std::string("non-finite profile field: ") + key);
+	return number;
+}
+
+static double Number(const picojson::object &obj, const char *key, double fallback)
+{
+	auto it = obj.find(key);
+	return it == obj.end() ? fallback : FiniteNumber(it->second, key);
+}
+
+static double Bounded(double value, double low, double high, const char *key)
+{
+	if (!std::isfinite(value) || value < low || value > high)
+		throw std::runtime_error(std::string("out-of-range profile field: ") + key);
+	return value;
+}
+
+static void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFloats)
+{
+	const auto &arr = Typed<picojson::array>(obj, "float array");
 	if (arr.size() != numFloats)
 		throw std::runtime_error("wrong buffer size");
-
-	for (int i = 0; i < numFloats; i++)
-		buf[i] = (float) arr[i].get<double>();
+	for (size_t i = 0; i < numFloats; ++i)
+	{
+		double value = FiniteNumber(arr[i], "float array element");
+		if (std::abs(value) > (std::numeric_limits<float>::max)())
+			throw std::runtime_error("float array element exceeds float range");
+		buf[i] = static_cast<float>(value);
+	}
 }
 
 static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 {
-	picojson::value v;
-	std::string err = picojson::parse(v, stream);
-	if (!err.empty())
-		throw std::runtime_error(err);
-
-	auto arr = v.get<picojson::array>();
-	if (arr.size() < 1)
+	picojson::value value;
+	std::string error = picojson::parse(value, stream);
+	if (!error.empty())
+		throw std::runtime_error(error);
+	auto profiles = Typed<picojson::array>(value, "profiles");
+	if (profiles.empty())
 		throw std::runtime_error("no profiles in file");
+	auto obj = Typed<picojson::object>(profiles[0], "profile");
 
-	auto obj = arr[0].get<picojson::object>();
+	CalibrationContext candidate = ctx;
+	candidate.Clear();
+	candidate.targetTrackingSystem = Typed<std::string>(Required(obj, "target_tracking_system"), "target_tracking_system");
+	candidate.hmdSerial = Optional<std::string>(obj, "hmd_serial", "");
+	candidate.trackerSerial = Optional<std::string>(obj, "tracker_serial", "");
+	for (const auto *text : { &candidate.targetTrackingSystem, &candidate.hmdSerial, &candidate.trackerSerial })
+		if (text->size() >= vr::k_unMaxPropertyStringSize || text->find('\0') != std::string::npos)
+			throw std::runtime_error("invalid tracking-system or serial string");
+	if (candidate.targetTrackingSystem.empty())
+		throw std::runtime_error("empty target tracking system");
 
-	ctx.targetTrackingSystem = obj["target_tracking_system"].get<std::string>();
+	const char *rotationKeys[] = { "roll", "yaw", "pitch" };
+	const char *translationKeys[] = { "x", "y", "z" };
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		candidate.calibratedRotation(axis) = FiniteNumber(Required(obj, rotationKeys[axis]), rotationKeys[axis]);
+		candidate.calibratedTranslation(axis) = FiniteNumber(Required(obj, translationKeys[axis]), translationKeys[axis]);
+	}
+	// Broad physical bounds reject corrupt/extreme ratios while retaining manual
+	// scale edits and older profiles, whose missing fields keep their defaults.
+	candidate.calibratedScale = Bounded(Number(obj, "scale", 1.0), 0.01, 100.0, "scale");
+	candidate.targetModelScale = Bounded(Number(obj, "targetModelScale", candidate.calibratedScale), 0.01, 100.0, "targetModelScale");
+	candidate.hmdScale = Bounded(Number(obj, "hmdScale", 1.0), 0.01, 100.0, "hmdScale");
+	candidate.fallbackToSlam = Typed<bool>(Required(obj, "fallbackSlam"), "fallbackSlam");
+	candidate.enableAngularVelocity = Typed<bool>(Required(obj, "eAngVel"), "eAngVel");
+	candidate.continuousSync = Optional<bool>(obj, "continuousSync", true);
+	candidate.followSlamHmd = Optional<bool>(obj, "followSlam", false);
+	candidate.noHeadTracker = Optional<bool>(obj, "noHeadTracker", false);
+	candidate.hideHeadTracker = Optional<bool>(obj, "hideHeadTracker", false);
+	candidate.uiScale = static_cast<float>((std::max)(0.8, (std::min)(2.0, Number(obj, "uiScale", 1.25))));
+	candidate.predictionTime = static_cast<float>(Bounded(Number(obj, "predictionTime", 1.0), 0.0, 10.0, "predictionTime"));
 
-	if (obj["hmd_serial"].is<std::string>())
-		ctx.hmdSerial = obj["hmd_serial"].get<std::string>();
-	if (obj["tracker_serial"].is<std::string>())
-		ctx.trackerSerial = obj["tracker_serial"].get<std::string>();
-	ctx.calibratedRotation(0) = obj["roll"].get<double>();
-	ctx.calibratedRotation(1) = obj["yaw"].get<double>();
-	ctx.calibratedRotation(2) = obj["pitch"].get<double>();
-	ctx.calibratedTranslation(0) = obj["x"].get<double>();
-	ctx.calibratedTranslation(1) = obj["y"].get<double>();
-	ctx.calibratedTranslation(2) = obj["z"].get<double>();
-
-	if (obj["scale"].is<double>())
-		ctx.calibratedScale = obj["scale"].get<double>();
-	else
-		ctx.calibratedScale = 1.0;
-
-	if (obj["targetModelScale"].is<double>())
-		ctx.targetModelScale = obj["targetModelScale"].get<double>();
-	else
-		ctx.targetModelScale = ctx.calibratedScale;
-
-	if (obj["hmdScale"].is<double>())
-		ctx.hmdScale = obj["hmdScale"].get<double>();
-	else
-		ctx.hmdScale = 1.0;
-
-	if (ctx.targetModelScale <= 0.0)
-		ctx.targetModelScale = 1.0;
-	if (ctx.hmdScale <= 0.0)
-		ctx.hmdScale = 1.0;
-
-	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
-	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
-
-	if (obj["continuousSync"].is<bool>())
-		ctx.continuousSync = obj["continuousSync"].get<bool>();
-	else
-		ctx.continuousSync = true;
-
-	if (obj["followSlam"].is<bool>())
-		ctx.followSlamHmd = obj["followSlam"].get<bool>();
-	else
-		ctx.followSlamHmd = false;
-
-	if (obj["noHeadTracker"].is<bool>())
-		ctx.noHeadTracker = obj["noHeadTracker"].get<bool>();
-	else
-		ctx.noHeadTracker = false;
-
-	if (obj["hideHeadTracker"].is<bool>())
-		ctx.hideHeadTracker = obj["hideHeadTracker"].get<bool>();
-	else
-		ctx.hideHeadTracker = false;
-
-	if (obj["uiScale"].is<double>())
-		ctx.uiScale = (float)obj["uiScale"].get<double>();
-	else
-		ctx.uiScale = 1.25f;
-	if (ctx.uiScale < 0.8f) ctx.uiScale = 0.8f;
-	if (ctx.uiScale > 2.0f) ctx.uiScale = 2.0f;
-
-	if (obj["predictionTime"].is<double>())
-		ctx.predictionTime = obj["predictionTime"].get<double>();
-	else
-		ctx.predictionTime = 1.0;
-
-	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams &out, protocol::OneEuroParams def) {
-		out = def;
-		if (!obj[key].is<picojson::object>())
-			return;
-		auto o = obj[key].get<picojson::object>();
-		if (o["minCutoff"].is<double>()) out.minCutoff = o["minCutoff"].get<double>();
-		if (o["beta"].is<double>())      out.beta = o["beta"].get<double>();
-		if (o["dCutoff"].is<double>())   out.dCutoff = o["dCutoff"].get<double>();
+	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams defaults) {
+		auto it = obj.find(key);
+		if (it == obj.end()) return defaults;
+		auto filter = Typed<picojson::object>(it->second, key);
+		return protocol::OneEuroParams {
+			Bounded(Number(filter, "minCutoff", defaults.minCutoff), 0.001, 1000.0, "minCutoff"),
+			Bounded(Number(filter, "beta", defaults.beta), 0.0, 1000.0, "beta"),
+			Bounded(Number(filter, "dCutoff", defaults.dCutoff), 0.001, 1000.0, "dCutoff")
+		};
 	};
+	candidate.headFilterEnabled = Optional<bool>(obj, "headFilterEnabled", true);
+	candidate.headFilterParams = loadOneEuro("headFilter", {2.0, 0.5, 1.0});
+	candidate.driftFilterParams = loadOneEuro("driftFilter", {1.0, 0.4, 0.85});
 
-	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : true;
-	loadOneEuro("headFilter", ctx.headFilterParams, { 2.0, 0.5, 1.0 });
-	loadOneEuro("driftFilter", ctx.driftFilterParams, { 1.0, 0.4, 0.85 });
-
-	if (obj["rel_qw"].is<double>())
+	const char *relativeKeys[] = { "rel_qw", "rel_qx", "rel_qy", "rel_qz", "rel_tx", "rel_ty", "rel_tz" };
+	bool hasRelative = false;
+	for (auto key : relativeKeys) hasRelative |= obj.find(key) != obj.end();
+	if (hasRelative)
 	{
-		ctx.relativeRotation.w = obj["rel_qw"].get<double>();
-		ctx.relativeRotation.x = obj["rel_qx"].get<double>();
-		ctx.relativeRotation.y = obj["rel_qy"].get<double>();
-		ctx.relativeRotation.z = obj["rel_qz"].get<double>();
-		ctx.relativeTranslation.v[0] = obj["rel_tx"].get<double>();
-		ctx.relativeTranslation.v[1] = obj["rel_ty"].get<double>();
-		ctx.relativeTranslation.v[2] = obj["rel_tz"].get<double>();
-		ctx.validRelativeOffset = true;
+		double q[4];
+		for (int i = 0; i < 4; ++i) q[i] = FiniteNumber(Required(obj, relativeKeys[i]), relativeKeys[i]);
+		double norm = std::hypot(std::hypot(q[0], q[1]), std::hypot(q[2], q[3]));
+		if (!std::isfinite(norm) || norm < 1e-6 || std::abs(norm - 1.0) > 0.01)
+			throw std::runtime_error("relative rotation is not a unit quaternion");
+		candidate.relativeRotation = { q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm };
+		for (int axis = 0; axis < 3; ++axis)
+			candidate.relativeTranslation.v[axis] = FiniteNumber(Required(obj, relativeKeys[axis + 4]), relativeKeys[axis + 4]);
+		candidate.validRelativeOffset = true;
 	}
-	else
+	double speed = Number(obj, "calibration_speed", static_cast<double>(candidate.calibrationSpeed));
+	if (speed != std::floor(speed) || speed < static_cast<double>(CalibrationContext::FAST)
+		|| speed > static_cast<double>(CalibrationContext::VERY_SLOW))
+		throw std::runtime_error("invalid calibration speed");
+	candidate.calibrationSpeed = static_cast<CalibrationContext::Speed>(static_cast<int>(speed));
+
+	auto chaperoneIt = obj.find("chaperone");
+	if (chaperoneIt != obj.end())
 	{
-		ctx.validRelativeOffset = false;
+		auto chaperone = Typed<picojson::object>(chaperoneIt->second, "chaperone");
+		candidate.chaperone.autoApply = Typed<bool>(Required(chaperone, "auto_apply"), "auto_apply");
+		LoadFloatArray(Required(chaperone, "play_space_size"), candidate.chaperone.playSpaceSize.v, 2);
+		if (candidate.chaperone.playSpaceSize.v[0] < 0 || candidate.chaperone.playSpaceSize.v[1] < 0)
+			throw std::runtime_error("negative play space size");
+		LoadFloatArray(Required(chaperone, "standing_center"), &candidate.chaperone.standingCenter.m[0][0], 12);
+		auto geometry = Typed<picojson::array>(Required(chaperone, "geometry"), "geometry");
+		constexpr size_t floatsPerQuad = 12;
+		constexpr size_t maxQuads = 4096;
+		if (geometry.size() % floatsPerQuad != 0 || geometry.size() / floatsPerQuad > maxQuads)
+			throw std::runtime_error("chaperone geometry must contain complete quads within the size limit");
+		candidate.chaperone.geometry.resize(geometry.size() / floatsPerQuad);
+		// Address each actual vertex array: do not walk across HmdQuad_t objects
+		// through a float pointer or assume padding/layout beyond OpenVR's API.
+		for (size_t quad = 0; quad < candidate.chaperone.geometry.size(); ++quad)
+			for (size_t corner = 0; corner < 4; ++corner)
+				for (size_t axis = 0; axis < 3; ++axis)
+				{
+					double coordinate = FiniteNumber(geometry[quad * 12 + corner * 3 + axis], "geometry coordinate");
+					if (std::abs(coordinate) > (std::numeric_limits<float>::max)())
+						throw std::runtime_error("geometry coordinate exceeds float range");
+					candidate.chaperone.geometry[quad].vCorners[corner].v[axis] = static_cast<float>(coordinate);
+				}
+		candidate.chaperone.valid = true;
 	}
-
-	if (obj["calibration_speed"].is<double>())
-		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
-
-	if (obj["chaperone"].is<picojson::object>())
-	{
-		auto chaperone = obj["chaperone"].get<picojson::object>();
-		ctx.chaperone.autoApply = chaperone["auto_apply"].get<bool>();
-
-		LoadFloatArray(chaperone["play_space_size"], ctx.chaperone.playSpaceSize.v, 2);
-
-		LoadFloatArray(
-			chaperone["standing_center"],
-			(float *) ctx.chaperone.standingCenter.m,
-			sizeof(ctx.chaperone.standingCenter.m) / sizeof(float)
-		);
-
-		if (!chaperone["geometry"].is<picojson::array>())
-			throw std::runtime_error("chaperone geometry is not an array");
-
-		auto &geometry = chaperone["geometry"].get<picojson::array>();
-
-		if (geometry.size() > 0)
-		{
-			ctx.chaperone.geometry.resize(geometry.size() * sizeof(float) / sizeof(ctx.chaperone.geometry[0]));
-			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), geometry.size());
-
-			ctx.chaperone.valid = true;
-		}
-	}
-
-	ctx.validProfile = true;
+	candidate.validProfile = true;
+	ctx = std::move(candidate);
 }
 
 static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
@@ -311,14 +326,14 @@ static std::string ReadRegistryKey()
 	return str;
 }
 
-static void WriteRegistryKey(std::string str)
+static bool WriteRegistryKey(const std::string &str)
 {
 	HKEY hkey;
 	auto result = RegCreateKeyExA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, 0, REG_NONE, 0, KEY_ALL_ACCESS, 0, &hkey, 0);
 	if (result != ERROR_SUCCESS)
 	{
 		LogRegistryResult(result);
-		return;
+		return false;
 	}
 
 	DWORD size = str.size() + 1;
@@ -328,12 +343,11 @@ static void WriteRegistryKey(std::string str)
 		LogRegistryResult(result);
 
 	RegCloseKey(hkey);
+	return result == ERROR_SUCCESS;
 }
 
 void LoadProfile(CalibrationContext &ctx)
 {
-	ctx.validProfile = false;
-
 	auto str = ReadRegistryKey();
 	if (str == "")
 	{
@@ -354,11 +368,11 @@ void LoadProfile(CalibrationContext &ctx)
 	}
 }
 
-void SaveProfile(CalibrationContext &ctx)
+bool SaveProfile(CalibrationContext &ctx)
 {
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream io;
 	WriteProfile(ctx, io);
-	WriteRegistryKey(io.str());
+	return WriteRegistryKey(io.str());
 }
