@@ -9,6 +9,7 @@ add_executable(spacesync_driver_tests
     boundary_stubs.cpp
     "${SPACESYNC_DRIVER_ROOT}/src/driver/ServerTrackedDeviceProvider.cpp"
     "${SPACESYNC_DRIVER_ROOT}/src/driver/KalmanFilter.cpp"
+    "${SPACESYNC_DRIVER_ROOT}/src/driver/PoseCapture.cpp"
     "${SPACESYNC_DRIVER_ROOT}/src/driver/IPCServer.cpp")
 target_compile_features(spacesync_driver_tests PRIVATE cxx_std_20)
 target_include_directories(spacesync_driver_tests PRIVATE

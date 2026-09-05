@@ -7,20 +7,32 @@
 #include "OneEuroFilter.h"
 #include "AlignmentEstimator.h"
 #include "KalmanFilter.h"
+#include "PoseHistory.h"
+#include "BoundedWorker.h"
+#include "PoseCapture.h"
 
 #include <openvr_driver.h>
 
 #include <cmath>
 #include <mutex>
 #include <condition_variable>
+#include <limits>
 
 // External runtime access is separated from state processing: SteamVR may call
 // another driver's pose callback while serving a pose query.
+struct TimedTrackerPose
+{
+    vr::TrackedDevicePose_t pose = {};
+    // Absolute QPC seconds represented by pose, including any query prediction.
+    // NaN means no usable timing contract, so this sample cannot replace HMD.
+    double targetTime = std::numeric_limits<double>::quiet_NaN();
+};
+
 class DriverPoseSource
 {
 public:
 	virtual ~DriverPoseSource() = default;
-	virtual vr::TrackedDevicePose_t ReadTrackerPose(uint32_t hmdID, uint32_t trackerID, float predictionFrames) = 0;
+	virtual TimedTrackerPose ReadTrackerPose(uint32_t hmdID, uint32_t trackerID, float predictionFrames) = 0;
 };
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
@@ -53,7 +65,8 @@ public:
 
 	////// End vr::IServerTrackedDeviceProvider functions
 
-	explicit ServerTrackedDeviceProvider(DriverPoseSource* poseSource = nullptr) : poseSource(poseSource), server(this) { }
+	explicit ServerTrackedDeviceProvider(DriverPoseSource* poseSource = nullptr);
+	~ServerTrackedDeviceProvider();
 	void SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
@@ -70,6 +83,8 @@ private:
 	// require it too. Never hold it while calling the external pose source.
 	std::mutex stateMutex;
 	uint64_t stateGeneration = 0;
+	uint64_t alignmentEpoch = 0;
+	spacesync::PoseCapture poseCapture;
 	DriverPoseSource* poseSource;
 	std::mutex callbackMutex;
 	std::condition_variable callbacksDrained;
@@ -89,7 +104,7 @@ private:
 	};
 	// confidence 0..1 = how much this sample may move the drift estimate.
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
-		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double confidence);
+		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double confidence, double sampleTime);
 
 	// Drift changes slowly, but fast head motion makes a single sample unreliable, so weight by speed.
 	static double DriftSampleConfidence(double linSpeed, double angSpeed)
@@ -106,9 +121,32 @@ private:
 		return 1.0 / (1.0 + l * l + a * a);
 	}
 
-	bool DetectHmdFrameJump(const vr::DriverPose_t &pose, double &jumpYaw, vr::HmdVector3d_t &jumpTranslation);
+	bool DetectHmdFrameJump(const vr::DriverPose_t &pose, double &jumpYaw, vr::HmdVector3d_t &jumpTranslation, bool& frameChanged);
 
 	align::ClockAligner clock;
+	align::RigidPairHistory pairHistory;
+	double lastPairTime = -1.0;
+	double recoveryStarted = -1.0;
+	unsigned recoveryPairs = 0;
+	double nextSolveTime = 0.0;
+	struct AlignmentWork
+	{
+		align::ClockAligner clock;
+		align::MountRefiner refine;
+		align::MountRefiner::Delta applied;
+		uint64_t configuration = 0, epoch = 0, history = 0;
+		double time = 0.0;
+		bool solveClock = false, solveRefine = false;
+		bool clockUpdated = false, refineUpdated = false;
+	};
+	using AlignmentWorker = BoundedWorker<AlignmentWork>;
+	std::unique_ptr<AlignmentWorker> alignmentWorker;
+	bool solveOutstanding = false, refineOutstanding = false;
+	static void SolveAlignment(AlignmentWork& work);
+	void ScheduleAlignment(double time);
+	void PublishAlignment(double now, const vr::HmdQuaternion_t& rawRotation,
+		const vr::HmdVector3d_t& rawPosition, const vr::HmdQuaternion_t& headRotationBase);
+	void InvalidateAlignmentHistory(bool resetPoses = true);
 	double clockLogTime = 0.0;
 	double lastHmdTime = -1.0;
 	double tauRotTrim = 0.0;
@@ -160,6 +198,7 @@ private:
 
 		void reset() { primed = false; }
 	} hmdFrame;
+	HmdFrameWatch trackerFrame;
 
 	struct ResidualDiag
 	{
@@ -171,7 +210,7 @@ private:
 	} residualDiag;
 
 	align::MountRefiner refine;
-	LARGE_INTEGER refineLast = {};
+	double refineLast = -1.0;
 	bool refinePrimed = false;
 	double refineLogTime = 0.0;
 
@@ -221,7 +260,7 @@ private:
 	};
 	TrackerSample trackerSample;
 
-	void StoreTrackerSample(const vr::DriverPose_t &pose);
+	void StoreTrackerSample(const vr::DriverPose_t &pose, const LARGE_INTEGER& arrival);
 	TrackerSample LoadTrackerSample();
 
 	double SlamToCorrectedScaleBase() const
@@ -271,7 +310,7 @@ private:
 		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
 		vr::HmdVector3d_t translation = { 0, 0, 0 };
 
-		LARGE_INTEGER lastUpdate = {};
+		double lastUpdate = -1.0;
 		align::YawTranslationEstimator estimator;
 	} drift;
 
@@ -279,7 +318,7 @@ private:
 	{
 		bool enabled = false;
 		bool valid = false;
-		LARGE_INTEGER lastUpdate = {};
+		double lastUpdate = -1.0;
 		oneeuro::Quat rotationFilter;
 		oneeuro::Vec3 translationFilter;
 
@@ -295,7 +334,7 @@ private:
 	struct HeadVelocity
 	{
 		bool valid = false;
-		LARGE_INTEGER lastUpdate = {};
+		double lastUpdate = -1.0;
 		vr::HmdQuaternion_t prevRotation = { 1, 0, 0, 0 };
 		oneeuro::Vec3 filter;
 
